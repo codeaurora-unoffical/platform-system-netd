@@ -41,6 +41,12 @@ endif
 
 LOCAL_SHARED_LIBRARIES := libsysutils libcutils libnetutils libcrypto
 
+ifeq ($(BOARD_HAS_QCOM_WLAN), true)
+LOCAL_CFLAGS += -DQCOM_WLAN
+LOCAL_SHARED_LIBRARIES += libqsap_sdk
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/../qcom/softap/sdk/
+endif
+
 ifeq ($(BOARD_HAVE_BLUETOOTH),true)
   LOCAL_SHARED_LIBRARIES := $(LOCAL_SHARED_LIBRARIES) libbluedroid
   LOCAL_CFLAGS := $(LOCAL_CFLAGS) -DHAVE_BLUETOOTH
