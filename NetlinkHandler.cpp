@@ -25,6 +25,7 @@
 #include <sysutils/NetlinkEvent.h>
 #include "NetlinkHandler.h"
 #include "NetlinkManager.h"
+#include "UsbController.h"
 #include "ResponseCode.h"
 
 NetlinkHandler::NetlinkHandler(NetlinkManager *nm, int listenerSocket) :
@@ -44,11 +45,16 @@ int NetlinkHandler::stop() {
 }
 
 void NetlinkHandler::onEvent(NetlinkEvent *evt) {
+    UsbController *uc = UsbController::Instance();
     const char *subsys = evt->getSubsystem();
+
     if (!subsys) {
         LOGW("No subsystem found in netlink event");
         return;
     }
+
+    LOGD("in netd: NetlinkHandler, subsystem is :%s ", subsys);
+
     if (!strcmp(subsys, "net")) {
         int action = evt->getAction();
         if (action == evt->NlActionAdd) {
@@ -62,6 +68,8 @@ void NetlinkHandler::onEvent(NetlinkEvent *evt) {
             const char *iface = evt->findParam("INTERFACE");
             notifyInterfaceChanged("nana", true);
         }
+    } else if(!strcmp(subsys, "switch")){
+        uc->handleSwitchEvent(evt);
     }
 }
 
