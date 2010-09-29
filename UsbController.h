@@ -18,11 +18,31 @@
 #define _USB_CONTROLLER_H
 
 #include <linux/in.h>
+#include <utils/List.h>
+#include <sysutils/SocketListener.h>
 
+class NetlinkEvent;
 
 class UsbController {
 
+private :
+    static UsbController *sInstance;
+
+private:
+    SocketListener        *mBroadcaster;
+    bool                   mUsbConnected;
+
 public:
+    int start();
+    void handleSwitchEvent(NetlinkEvent *evt);
+
+    void notifyUsbConnected(bool connected);
+
+    void setBroadcaster(SocketListener *sl) { mBroadcaster = sl; }
+    SocketListener *getBroadcaster() { return mBroadcaster; }
+
+    static UsbController *Instance();
+
     UsbController();
     virtual ~UsbController();
 

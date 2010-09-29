@@ -40,8 +40,16 @@ int main() {
 
     CommandListener *cl;
     NetlinkManager *nm;
+    UsbController *uc;
 
     LOGI("Netd 1.0 starting");
+
+    /*Create UsbController*/
+    if (!(uc = UsbController::Instance())) {
+        SLOGE("Unable to create UsbController");
+        exit(1);
+    };
+
 
 //    signal(SIGCHLD, sigchld_handler);
 
@@ -52,10 +60,18 @@ int main() {
 
 
     cl = new CommandListener();
+    uc->setBroadcaster((SocketListener *) cl);
     nm->setBroadcaster((SocketListener *) cl);
 
     if (nm->start()) {
         LOGE("Unable to start NetlinkManager (%s)", strerror(errno));
+        exit(1);
+    }
+
+    coldboot("/sys/class/switch");
+
+    if (uc->start()) {
+        SLOGE("Unable to start UsbController (%s)", strerror(errno));
         exit(1);
     }
 

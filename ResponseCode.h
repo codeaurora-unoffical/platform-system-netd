@@ -52,5 +52,6 @@ public:
 
     // 600 series - Unsolicited broadcasts
     static const int InterfaceChange        = 600;
+    static const int UsbConnected           = 610;
 };
 #endif
