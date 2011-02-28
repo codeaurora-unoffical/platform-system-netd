@@ -36,6 +36,10 @@
 
 #include "SoftapController.h"
 
+#ifdef QCOM_WLAN
+#include "qsap.h"
+#endif
+
 SoftapController::SoftapController() {
     mPid = 0;
     mSock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -71,6 +75,12 @@ int SoftapController::getPrivFuncNum(char *iface, const char *fname) {
 }
 
 int SoftapController::startDriver(char *iface) {
+#ifdef QCOM_WLAN
+    if(0 != wifi_qsap_load_driver())
+        return -1;
+    else
+        return 0;
+#else
     struct iwreq wrq;
     int fnum, ret;
 
@@ -95,9 +105,13 @@ int SoftapController::startDriver(char *iface) {
     usleep(AP_DRIVER_START_DELAY);
     LOGD("Softap driver start: %d", ret);
     return ret;
+#endif
 }
 
 int SoftapController::stopDriver(char *iface) {
+#ifdef QCOM_WLAN
+    return 0;
+#else
     struct iwreq wrq;
     int fnum, ret;
 
@@ -121,9 +135,14 @@ int SoftapController::stopDriver(char *iface) {
     ret = ioctl(mSock, fnum, &wrq);
     LOGD("Softap driver stop: %d", ret);
     return ret;
+#endif
+
 }
 
 int SoftapController::startSoftap() {
+#ifdef QCOM_WLAN
+    return  0;
+#else
     struct iwreq wrq;
     pid_t pid = 1;
     int fnum, ret = 0;
@@ -167,10 +186,19 @@ int SoftapController::startSoftap() {
         }
     }
     return ret;
-
+#endif
 }
 
 int SoftapController::stopSoftap() {
+#ifdef QCOM_WLAN
+    if (0 == wifi_qsap_stop_softap()) {
+    /* Wait for the driver to finish the unloading */
+	sleep(1);
+	return 0;
+    }
+
+    return -1;
+#else
     struct iwreq wrq;
     int fnum, ret;
 
@@ -201,10 +229,15 @@ int SoftapController::stopSoftap() {
     LOGD("Softap service stopped: %d", ret);
     usleep(AP_BSS_STOP_DELAY);
     return ret;
+#endif
 }
 
 bool SoftapController::isSoftapStarted() {
+#ifdef QCOM_WLAN
+    return is_softap_enabled();
+#else
     return (mPid != 0 ? true : false);
+#endif
 }
 
 int SoftapController::addParam(int pos, const char *cmd, const char *arg)
@@ -231,6 +264,9 @@ int SoftapController::addParam(int pos, const char *cmd, const char *arg)
  *	argv[9] - Max SCB
  */
 int SoftapController::setSoftap(int argc, char *argv[]) {
+#ifdef QCOM_WLAN
+    return qsapsetSoftap(argc, argv);
+#else
     unsigned char psk[SHA256_DIGEST_LENGTH];
     char psk_str[2*SHA256_DIGEST_LENGTH+1];
     struct iwreq wrq;
@@ -316,6 +352,7 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
         usleep(AP_SET_CFG_DELAY);
     }
     return ret;
+#endif
 }
 
 /*
@@ -325,6 +362,9 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
  */
 int SoftapController::fwReloadSoftap(int argc, char *argv[])
 {
+#ifdef QCOM_WLAN
+    return 0;
+#else
     struct iwreq wrq;
     int fnum, ret, i = 0;
     char *iface;
@@ -366,4 +406,5 @@ int SoftapController::fwReloadSoftap(int argc, char *argv[])
         LOGD("Softap fwReload - Ok");
     }
     return ret;
+#endif
 }
