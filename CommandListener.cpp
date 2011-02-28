@@ -34,6 +34,10 @@
 #include "ResponseCode.h"
 #include "ThrottleController.h"
 
+#ifdef QCOM_WLAN
+#include "qsap_api.h"
+#endif
+
 
 extern "C" int ifc_init(void);
 extern "C" void ifc_close(void);
@@ -625,7 +629,41 @@ int CommandListener::SoftapCmd::runCommand(SocketClient *cli,
         return 0;
     } else if (!strcmp(argv[1], "set")) {
         rc = sSoftapCtrl->setSoftap(argc, argv);
-    } else {
+    }
+#ifdef QCOM_WLAN
+    else if (!strcmp(argv[1], "qccmd")) {
+#define MAX_CMD_SIZE 256
+    char qccmdbuf[MAX_CMD_SIZE], *pcmdbuf;
+    int len = MAX_CMD_SIZE, i=2, ret;
+
+    if ( argc < 4 ) {
+        cli->sendMsg("failure: invalid arguments");
+	return 0;
+    }
+
+    argc -= 2;
+    pcmdbuf = qccmdbuf;
+
+    while(argc--) {
+        ret = snprintf(pcmdbuf, len, " %s", argv[i]);
+	if ( ret == len ) {
+	/* Error case */
+	/* TODO: Command too long send the error message */
+            *pcmdbuf = '\0';
+             break;
+	}
+	pcmdbuf += ret;
+	len -= ret;
+	i++;
+	}
+
+	len = MAX_CMD_SIZE;
+	qsap_hostd_exec_cmd(qccmdbuf, qccmdbuf, (u32*)&len);
+	cli->sendMsg(qccmdbuf);
+	return 0;
+    }
+#endif
+    else {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Softap Unknown cmd", false);
         return 0;
     }
