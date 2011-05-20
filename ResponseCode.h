@@ -45,6 +45,8 @@ public:
     static const int QuotaCounterResult        = 220;
     static const int TetheringStatsResult      = 221;
     static const int RouteConfigurationResult  = 222;
+    static const int V6RtrAdvResult            = 223;
+
 
     // 400 series - The command was accepted but the requested action
     // did not take place.
