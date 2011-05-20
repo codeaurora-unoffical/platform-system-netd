@@ -42,6 +42,7 @@ public:
     static const int InterfaceRxThrottleResult = 218;
     static const int InterfaceTxThrottleResult = 219;
     static const int RouteConfigurationResult  = 220;
+    static const int V6RtrAdvResult            = 221;
 
     // 400 series - The command was accepted but the requested action
     // did not take place.
