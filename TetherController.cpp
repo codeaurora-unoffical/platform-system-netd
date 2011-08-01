@@ -261,7 +261,7 @@ int TetherController::startV6RtrAdv(int num_ifaces, char **ifaces) {
         }
         free(args[0]);
         free(args);
-        return 0;
+        exit(0);
     } else {
         mRtrAdvPid = pid;
         LOGD("Router advertisement daemon running");
