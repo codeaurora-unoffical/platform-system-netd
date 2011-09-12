@@ -60,7 +60,7 @@
 #endif
 
 #include <sys/_system_properties.h>
-#include "libhostapd_client/wpa_ctrl.h"
+//#include "libhostapd_client/wpa_ctrl.h"
 
 static const char IFACE_DIR[]           = "/dev/socket/hostapd_";
 static const char HOSTAPD_NAME[]     = "hostapd";
@@ -188,7 +188,7 @@ int wifi_start_hostapd()
 
 
     /* Clear out any stale socket files that might be left over. */
-    wpa_ctrl_cleanup();
+    //wpa_ctrl_cleanup();
 
 #ifdef HAVE_LIBC_SYSTEM_PROPERTIES
     /*
@@ -615,6 +615,8 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
         return -1;
     }
     len = snprintf(buf, sizeof(buf), "interface=%s\n", mIface);
+    write(fd, buf, len);
+    len = snprintf(buf, sizeof(buf), "ctrl_interface=%s\n", mIface);
     write(fd, buf, len);
     if (argc > 4) {
         len = snprintf(buf, sizeof(buf), "ssid=%s\n",argv[4]);
