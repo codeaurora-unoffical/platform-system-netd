@@ -32,6 +32,8 @@ public:
 
 private:
     int enableRNDIS(bool enable);
+    void rndis_enable(bool);
+    bool function_enabled(const char *);
 };
 
 #endif
