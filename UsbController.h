@@ -19,6 +19,13 @@
 
 #include <linux/in.h>
 
+struct usb_target_pid_table
+{
+    const char *platform;
+    const char *baseband;
+    const char *pid;
+    const char *functions;
+};
 
 class UsbController {
 
@@ -31,6 +38,12 @@ public:
     bool isRNDISStarted();
 
 private:
+    static struct usb_target_pid_table disableRNDIS_disableADB_list[];
+    static struct usb_target_pid_table disableRNDIS_enableADB_list[];
+    static struct usb_target_pid_table enableRNDIS_disableADB_list[];
+    static struct usb_target_pid_table enableRNDIS_enableADB_list[];
+
+    void select_pid_funcs(const char **, const char **, bool);
     int enableRNDIS(bool enable);
     void rndis_enable(bool);
     bool function_enabled(const char *);
