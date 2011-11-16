@@ -18,7 +18,7 @@ LOCAL_SRC_FILES:=                                      \
                   ThrottleController.cpp               \
                   logwrapper.c                         \
                   main.cpp                             \
-
+                  RouteController.cpp
 
 LOCAL_MODULE:= netd
 

@@ -27,6 +27,7 @@
 #include "SoftapController.h"
 #include "BandwidthController.h"
 #include "ResolverController.h"
+#include "RouteController.h"
 
 class CommandListener : public FrameworkListener {
     static TetherController *sTetherCtrl;
@@ -36,6 +37,7 @@ class CommandListener : public FrameworkListener {
     static SoftapController *sSoftapCtrl;
     static BandwidthController *sBandwidthCtrl;
     static ResolverController *sResolverCtrl;
+    static RouteController *sRouteCtrl;
 
 public:
     CommandListener();
@@ -118,6 +120,13 @@ private:
     public:
         ResolverCmd();
         virtual ~ResolverCmd() {}
+        int runCommand(SocketClient *c, int argc, char ** argv);
+    };
+
+    class RouteCmd : public NetdCommand {
+    public:
+        RouteCmd();
+        virtual ~RouteCmd() {}
         int runCommand(SocketClient *c, int argc, char ** argv);
     };
 };

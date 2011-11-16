@@ -38,6 +38,9 @@
 #include "ThrottleController.h"
 #include "BandwidthController.h"
 
+#ifndef INET_ADDRSTRLEN
+#define INET_ADDRSTRLEN 16
+#endif
 
 
 TetherController *CommandListener::sTetherCtrl = NULL;
@@ -47,6 +50,7 @@ PanController *CommandListener::sPanCtrl = NULL;
 SoftapController *CommandListener::sSoftapCtrl = NULL;
 BandwidthController * CommandListener::sBandwidthCtrl = NULL;
 ResolverController *CommandListener::sResolverCtrl = NULL;
+RouteController *CommandListener::sRouteCtrl = NULL;
 
 CommandListener::CommandListener() :
                  FrameworkListener("netd") {
@@ -60,6 +64,7 @@ CommandListener::CommandListener() :
     registerCmd(new SoftapCmd());
     registerCmd(new BandwidthControlCmd());
     registerCmd(new ResolverCmd());
+    registerCmd(new RouteCmd());
 
     if (!sTetherCtrl)
         sTetherCtrl = new TetherController();
@@ -75,6 +80,8 @@ CommandListener::CommandListener() :
         sBandwidthCtrl = new BandwidthController();
     if (!sResolverCtrl)
         sResolverCtrl = new ResolverController();
+    if (!sRouteCtrl)
+        sRouteCtrl = new RouteController();
 }
 
 CommandListener::InterfaceCmd::InterfaceCmd() :
@@ -1149,4 +1156,327 @@ int CommandListener::BandwidthControlCmd::runCommand(SocketClient *cli, int argc
 
     cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown bandwidth cmd", false);
     return 0;
+}
+
+CommandListener::RouteCmd::RouteCmd() :
+                 NetdCommand("route") {
+}
+
+int CommandListener::RouteCmd::runCommand(SocketClient *cli,
+                                          int argc, char **argv) {
+    if (argc < 5) {
+        cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
+        return 0;
+    }
+
+    const char *ipVer = NULL;
+    int domain;
+
+    if (!strcmp(argv[3], "v4")) {
+        ipVer = "-4";
+        domain = AF_INET;
+    } else if (!strcmp(argv[3], "v6")) {
+        ipVer = "-6";
+        domain = AF_INET6;
+    } else {
+        cli->sendMsg(ResponseCode::CommandSyntaxError,
+                     "Supported family v4|v6",false);
+        return 0;
+    }
+
+    if (!strcmp(argv[2], "src")) {
+        /* source based routing */
+        if (!strcmp(argv[1], "replace")) {
+            if (argc != 7 && argc != 8) {
+                cli->sendMsg(ResponseCode::CommandSyntaxError,
+                   "Usage: route replace src family <interface>"
+                   " <ipaddr> <routeId> [<gateway>]", false);
+                return 0;
+            }
+
+            int rid = atoi(argv[6]);
+            if ((rid < 1) || (rid > 252)) {
+                cli->sendMsg(ResponseCode::CommandParameterError,
+                                "0 < RouteID < 253", false);
+                return 0;
+            }
+
+            struct in_addr addr;
+            int prefix_length;
+            int structsz = (domain==AF_INET) ?
+                    sizeof(struct in_addr) : sizeof(struct in6_addr);
+            unsigned char s[structsz], g[structsz];
+            unsigned flags = 0;
+
+            /* verify if interface is UP */
+            ifc_init();
+            if (ifc_get_info(argv[4], &addr.s_addr, &prefix_length, &flags) ||
+                            !(flags & IFF_UP)) {
+                cli->sendMsg(ResponseCode::CommandParameterError,
+                             "Interface is down|not found", false);
+                ifc_close();
+                return 0;
+            }
+            ifc_close();
+
+            if (inet_pton(domain, argv[5], s) < 1) {
+                cli->sendMsg(ResponseCode::CommandParameterError,
+                             "Invalid src address", false);
+                return 0;
+            }
+
+            char *iface = argv[4],
+                 *srcPrefix = argv[5],
+                 *routeId = argv[6],
+                 *network = NULL,
+                 *gateway = NULL;
+
+            if (argc > 7) {
+                if (inet_pton(domain, argv[7], g) < 1) {
+                    cli->sendMsg(ResponseCode::CommandParameterError,
+                                 "Invalid gateway address", false);
+                    return 0;
+                } else {
+                    gateway = argv[7];
+                }
+            }
+
+            // compute the network block in CIDR notation (for IPv4 only)
+            if (domain == AF_INET) {
+                struct in_addr net;
+                in_addr_t mask = prefixLengthToIpv4Netmask(prefix_length);
+                net.s_addr = (addr.s_addr & mask);
+
+
+                char net_s[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &(net.s_addr), net_s, INET_ADDRSTRLEN);
+                asprintf(&network, "%s/%d", net_s, prefix_length);
+            }
+
+            char *tmp = NULL;
+            if (sRouteCtrl->repSrcRoute(iface, srcPrefix,
+                                    gateway, routeId, ipVer) != 0) {
+                asprintf(&tmp,"failed to set route for route id [%s]",routeId);
+                cli->sendMsg(ResponseCode::OperationFailed,tmp,true);
+            } else {
+                if (network != NULL) {
+                     // gateway should be null as traffic is on same subnet
+                    if (sRouteCtrl->addDstRoute(iface, network, NULL, routeId) != 0) {
+                        asprintf(&tmp,
+                             "source route replace succeeded for route id [%s]"
+                             ", but local destination routing failed", routeId);
+                    } else {
+                        asprintf(&tmp,
+                             "source route replace succeeded for route id [%s]"
+                             ", and local destination routing succeeded", routeId);
+                    }
+                    cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+                } else {
+                    asprintf(&tmp,
+                         "source route replace succeeded for route id [%s]", routeId);
+                    cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+                }
+            }
+            free(network);
+            free(tmp);
+        } else if (!strcmp(argv[1], "del")) {
+            if (argc != 5) {
+                cli->sendMsg(ResponseCode::CommandSyntaxError,
+                             "Usage: route src del v[4|6] <routeId>", false);
+                return 0;
+            }
+
+            int rid = atoi(argv[4]);
+
+            if ((rid < 1) || (rid > 252)) {
+                cli->sendMsg(ResponseCode::CommandParameterError,
+                             "RouteID: between 0 and 253", false);
+                return 0;
+            }
+
+            char *tmp = NULL;
+
+            if (sRouteCtrl->delSrcRoute(argv[4], ipVer) != 0) {
+                asprintf(&tmp,
+                    "failed to delete source route for route id [%s]",argv[4]);
+                cli->sendMsg(ResponseCode::OperationFailed,tmp, true);
+            } else {
+                asprintf(&tmp,
+                    "source route delete succeeded for route id [%s]",argv[4]);
+                cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+            }
+            free(tmp);
+
+        } else {
+            cli->sendMsg(ResponseCode::CommandSyntaxError,
+                         "permitted operation: <replace|del>", false);
+        }
+
+        return 0;
+
+    } else if (!strcmp(argv[2], "def")) {
+        /* default route configuration */
+        if (!strcmp(argv[1], "replace")) {
+            if ((argc != 5) && (argc != 6)) {
+                cli->sendMsg(ResponseCode::CommandSyntaxError,
+                        "Usage: route replace def v[4|6]"
+                        " <interface> [<gateway>]", false);
+                return 0;
+            }
+
+            struct in_addr addr;
+            int prefixLength;
+            int structsz = (domain==AF_INET) ?
+                    sizeof(struct in_addr) : sizeof(struct in6_addr);
+            unsigned char g[structsz];
+            unsigned flags = 0;
+
+            /* verify if interface is UP */
+            ifc_init();
+            if (ifc_get_info(argv[4], &addr.s_addr, &prefixLength, &flags) ||
+                            !(flags & IFF_UP)) {
+                cli->sendMsg(ResponseCode::CommandParameterError,
+                             "Interface is down|not found", false);
+                return 0;
+            }
+	    ifc_close();
+
+            char *iface = argv[4],
+                 *gateway = NULL;
+
+            if (argc > 5) {
+                if (inet_pton(domain, argv[5], g) < 1) {
+                    cli->sendMsg(ResponseCode::CommandParameterError,
+                                 "Invalid gateway address", false);
+                    return 0;
+                } else {
+                    gateway = argv[5];
+                }
+            }
+
+            char *tmp = NULL;
+
+            if (sRouteCtrl->replaceDefRoute(iface, gateway, ipVer) != 0) {
+                asprintf(&tmp,"failed to replace default route"
+                                " for [%s %s]", iface, ipVer);
+                cli->sendMsg(ResponseCode::OperationFailed,tmp,true);
+            } else {
+                asprintf(&tmp,"default route replace succeeded "
+                                "for [%s %s]", iface, ipVer);
+                cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+            }
+            free(tmp);
+
+        } else {
+            cli->sendMsg(ResponseCode::CommandSyntaxError,
+                         "Permitted action for def routes <replace>", false);
+        }
+
+    } else if (!strcmp(argv[2], "dst")) {
+        /* destination based route configuration */
+        if (!strcmp(argv[1], "add")) {
+            if (argc != 6 && argc != 7) {
+                cli->sendMsg(ResponseCode::CommandSyntaxError,
+                   "Usage: route dst add v[4|6]"
+                   " <interface> <ipaddr> [<gateway>]", false);
+                return 0;
+            }
+
+            struct in_addr addr;
+            int prefixLength;
+            int structsz = (domain==AF_INET) ?
+                    sizeof(struct in_addr) : sizeof(struct in6_addr);
+            unsigned char d[structsz], g[structsz];
+            unsigned flags = 0;
+
+            /* verify if interface is UP */
+            ifc_init();
+            if (ifc_get_info(argv[4], &addr.s_addr, &prefixLength, &flags) ||
+                            !(flags & IFF_UP)) {
+                cli->sendMsg(ResponseCode::CommandParameterError,
+                             "Interface is down|not found", false);
+                return 0;
+            }
+            ifc_close();
+
+            if (inet_pton(domain, argv[5], d) < 1) {
+                cli->sendMsg(ResponseCode::CommandParameterError,
+                             "Invalid dst address", false);
+                return 0;
+            }
+
+            char *iface = argv[4],
+                 *dstPrefix = argv[5],
+                 *gateway = NULL;
+
+            if (argc > 6) {
+                if (inet_pton(domain, argv[6], g) < 1) {
+                    cli->sendMsg(ResponseCode::CommandParameterError,
+                                 "Invalid gateway address", false);
+                    return 0;
+                } else {
+                    gateway = argv[6];
+                }
+            }
+
+            char *tmp = NULL;
+
+            //FIXME remove comments once IPV6 kernel issues for default routes are
+            //resolved. Until then ignore preexisting route addition error.Ignore
+            //the error here, rather than in RouteController since the validity of
+            //arguments is performed here.
+            /*if (*/sRouteCtrl->addDstRoute(iface, dstPrefix, gateway);/* != 0) {
+                asprintf(&tmp,"failed to set route for destination "
+                              "[%s %s]", iface, dstPrefix);
+                cli->sendMsg(ResponseCode::OperationFailed,tmp,true);
+            } else {*/
+                asprintf(&tmp,"destination route add succeeded "
+                              "for [%s %s]",iface, dstPrefix);
+                cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+            /*}*/
+            free(tmp);
+        } else if (!strcmp(argv[1], "del")) {
+            if (argc != 5) {
+                cli->sendMsg(ResponseCode::CommandSyntaxError,
+                             "Usage: route dst del v[4|6] <ipaddr>", false);
+                return 0;
+            }
+
+            int structsz = (domain==AF_INET) ?
+                    sizeof(struct in_addr) : sizeof(struct in6_addr);
+            unsigned char d[structsz];
+
+            if (inet_pton(domain, argv[4], d) < 1) {
+                cli->sendMsg(ResponseCode::CommandParameterError,
+                             "Invalid destination address", false);
+                return 0;
+            }
+
+            char *tmp = NULL;
+
+            if (sRouteCtrl->delDstRoute(argv[4]) != 0) {
+                asprintf(&tmp, "failed to delete destination "
+                               "route for [%s]", argv[4]);
+                cli->sendMsg(ResponseCode::OperationFailed,tmp, true);
+            } else {
+                asprintf(&tmp,
+                    "destination route delete succeeded for [%s]", argv[4]);
+                cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+            }
+            free(tmp);
+
+        } else {
+            cli->sendMsg(ResponseCode::CommandSyntaxError,
+                         "permitted operation: <add|del>", false);
+        }
+
+        return 0;
+
+    } else {
+        cli->sendMsg(ResponseCode::CommandParameterError,
+                     "host routes: <src|dst|def>",false);
+    }
+
+    return 0;
+
 }
