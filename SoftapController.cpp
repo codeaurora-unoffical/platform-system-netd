@@ -41,6 +41,8 @@
 
 #include "SoftapController.h"
 
+#define WIFI_DEFAULT_CHANNEL    6
+
 static const char HOSTAPD_CONF_FILE[]    = "/data/misc/wifi/hostapd.conf";
 
 SoftapController::SoftapController() {
@@ -285,6 +287,7 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
 #ifdef HAVE_HOSTAPD
     char *wbuf = NULL;
     char *fbuf = NULL;
+    int channel_num = 0;
 
     if (argc > 4) {
         ssid = argv[4];
@@ -292,8 +295,15 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
         ssid = (char *)"AndroidAP";
     }
 
-    asprintf(&wbuf, "interface=%s\ndriver=nl80211\nctrl_interface="
-            "/data/misc/wifi/hostapd\nssid=%s\nchannel=6\n", iface, ssid);
+    channel_num = (argc > 7) ? atoi(argv[7]) : WIFI_DEFAULT_CHANNEL;
+
+    if (channel_num > 14){
+        asprintf(&wbuf, "interface=%s\ndriver=nl80211\nctrl_interface="
+                "/data/misc/wifi/hostapd\nssid=%s\nchannel=%d\nhw_mode=a\n", iface, ssid, channel_num);
+    } else {
+        asprintf(&wbuf, "interface=%s\ndriver=nl80211\nctrl_interface="
+                "/data/misc/wifi/hostapd\nssid=%s\nchannel=%d\n", iface, ssid, channel_num);
+    }
 
     if (argc > 5) {
         if (!strcmp(argv[5], "wpa-psk")) {
