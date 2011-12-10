@@ -41,6 +41,9 @@
 
 #include "SoftapController.h"
 
+#ifdef QCOM_WLAN
+#include "qsap.h"
+#endif
 #define WIFI_DEFAULT_CHANNEL    6
 
 static const char HOSTAPD_CONF_FILE[]    = "/data/misc/wifi/hostapd.conf";
@@ -283,6 +286,9 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
 
     strncpy(mIface, argv[3], sizeof(mIface));
     iface = argv[2];
+#ifdef QCOM_WLAN
+    return qsapsetSoftap(argc, argv);
+#endif
 
 #ifdef HAVE_HOSTAPD
     char *wbuf = NULL;
