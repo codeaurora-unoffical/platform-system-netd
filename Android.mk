@@ -37,6 +37,9 @@ LOCAL_SHARED_LIBRARIES := libstlport libsysutils libcutils libnetutils \
 
 ifneq ($(BOARD_HOSTAPD_DRIVER),)
   LOCAL_CFLAGS += -DHAVE_HOSTAPD
+endif
+
+ifeq ($(BOARD_HAS_QCOM_WLAN), true)
   LOCAL_CFLAGS += -DQCOM_WLAN
   LOCAL_SHARED_LIBRARIES += libqsap_sdk
   LOCAL_C_INCLUDES += $(LOCAL_PATH)/../qcom/softap/sdk/
