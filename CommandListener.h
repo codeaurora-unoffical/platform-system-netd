@@ -28,6 +28,7 @@
 #include "BandwidthController.h"
 #include "ResolverController.h"
 #include "RouteController.h"
+#include "SecondaryTableController.h"
 
 class CommandListener : public FrameworkListener {
     static TetherController *sTetherCtrl;
@@ -38,6 +39,7 @@ class CommandListener : public FrameworkListener {
     static BandwidthController *sBandwidthCtrl;
     static ResolverController *sResolverCtrl;
     static RouteController *sRouteCtrl;
+    static SecondaryTableController *sSecondaryTableCtrl;
 
 public:
     CommandListener();
