@@ -74,6 +74,8 @@ int SecondaryTableController::addRoute(SocketClient *cli, char *iface, char *des
             return -1;
         }
         strncpy(mInterfaceTable[tableIndex], iface, MAX_IFACE_LENGTH);
+        // Ensure null termination even if truncation happened
+        mInterfaceTable[tableIndex][MAX_IFACE_LENGTH] = 0;
     }
 
     return modifyRoute(cli, ADD, iface, dest, prefix, gateway, tableIndex);
