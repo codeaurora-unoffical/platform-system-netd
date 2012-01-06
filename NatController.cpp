@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (c) 2012 Code Aurora Forum. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -74,12 +75,6 @@ int NatController::setDefaults() {
     if (runCmd(IPTABLES_PATH, "-t nat -F"))
         return -1;
 
-    runCmd(IP_PATH, "rule flush");
-    runCmd(IP_PATH, "-6 rule flush");
-    runCmd(IP_PATH, "rule add from all lookup default prio 32767");
-    runCmd(IP_PATH, "rule add from all lookup main prio 32766");
-    runCmd(IP_PATH, "-6 rule add from all lookup default prio 32767");
-    runCmd(IP_PATH, "-6 rule add from all lookup main prio 32766");
     runCmd(IP_PATH, "route flush cache");
 
     natCount = 0;
@@ -164,13 +159,20 @@ int NatController::enableNat(const int argc, char **argv) {
         snprintf(cmd, sizeof(cmd), "-t nat -A POSTROUTING -o %s -j MASQUERADE", extIface);
         if (runCmd(IPTABLES_PATH, cmd)) {
             LOGE("Error seting postroute rule: %s", cmd);
-            // unwind what's been done, but don't care about success - what more could we do?
-            for (i = 0; i < addrCount; i++) {
-                snprintf(cmd, sizeof(cmd), "route del %s dev %s table %d", argv[5+i], intIface,
-                        tableNumber + BASE_TABLE_NUMBER);
-                runCmd(IP_PATH, cmd);
+            if (tableNumber != -1) {
+                // unwind what's been done, but don't care
+                // about success - what more could we do?
+                for (i = 0; i < addrCount; i++) {
+                    snprintf(cmd, sizeof(cmd), "route del %s dev %s table %d",
+                            argv[5+i], intIface, tableNumber + BASE_TABLE_NUMBER);
+                    runCmd(IP_PATH, cmd);
+
+                    snprintf(cmd, sizeof(cmd), "%s rule del from %s table %d",
+                            getVersion(argv[5+i]), argv[5+i], tableNumber + BASE_TABLE_NUMBER);
+                    runCmd(IP_PATH, cmd);
+                }
+                setDefaults();
             }
-            setDefaults();
             return -1;
         }
     }
