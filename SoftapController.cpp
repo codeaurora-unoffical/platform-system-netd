@@ -185,6 +185,10 @@ int SoftapController::startSoftap() {
         LOGE("Softap startap - failed to open socket");
         return -1;
     }
+
+#ifdef QCOM_WLAN
+    qsap_set_ini_filename();
+#endif
 #ifdef HAVE_HOSTAPD
     if ((pid = fork()) < 0) {
         LOGE("fork failed (%s)", strerror(errno));
