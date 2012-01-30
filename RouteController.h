@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2011 Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012 Code Aurora Forum. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -30,12 +30,15 @@
 #ifndef _ROUTE_CONTROLLER_H
 #define _ROUTE_CONTROLLER_H
 
+#include <string.h>
+#include <string>
+
 class RouteController {
 public:
     RouteController();
     virtual ~RouteController();
 
-    int repSrcRoute
+    std::string repSrcRoute
     (
         const char *iface,
         const char *srcPrefix,
@@ -43,57 +46,72 @@ public:
         const char *table,
         const char *ipver
     );
-    int delSrcRoute
+    std::string delSrcRoute
     (
         const char *table,
         const char *ipver
     );
-    int addDstRoute
+    std::string addDstRoute
     (
         const char *iface,
         const char *dstPrefix,
         const char *gateway,
+        const int metric,
         const char *table = MAIN_TABLE
     );
-    int delDstRoute
+    std::string delDstRoute
     (
         const char *dstPrefix,
         const char *table = MAIN_TABLE
     );
-    int replaceDefRoute
+    std::string replaceDefRoute
     (
         const char *iface,
         const char *gateway,
         const char *ipver
+    );
+    std::string addDefRoute
+    (
+        const char *iface,
+        const char *gateway,
+        const char *ipver,
+        const int metric,
+        const char *table = MAIN_TABLE
     );
 
 private:
     const static char *MAIN_TABLE;
 
-    int runIpCmd
+    std::string _runIpCmd
     (
         const char *cmd
     );
-    int flushCache();
-    int repDefRoute
+    std::string _flushCache();
+    std::string _repDefRoute
     (
         const char *iface,
-	const char *gateway,
+        const char *gateway,
         const char *table,
         const char *ipver
     );
-    int delDefRoute
+    std::string _delDefRoute
     (
         const char *table,
-        const char *ipver
+        const char *ipver,
+        const char *iface = NULL
     );
-    int addRule
+    std::string _delHostRoute
+    (
+        const char *dstPrefix,
+        const char *table = MAIN_TABLE
+    );
+    std::string _addRule
     (
         const char *address,
         const char *table,
         const char *ipver
     );
-    int delRule
+    std::string _delRule
     (
         const char *table,
         const char *ipver

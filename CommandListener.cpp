@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2008 The Android Open Source Project
- * Copyright (c) 2012 Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2010-2012 Code Aurora Forum. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,29 +17,27 @@
 
 // #define LOG_NDEBUG 0
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <netinet/in.h>
+#include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+
 #include <linux/if.h>
-#include "cutils/properties.h"
-
-
-
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
-#include <netinet/icmp6.h>
-#include <netinet/ip6.h>
 #include <linux/filter.h>
 #include <linux/sockios.h>
-#include <stdio.h>
-#include <sys/ioctl.h>
 #include <net/if.h>
+#include <netinet/in.h>
+#include <netinet/icmp6.h>
+#include <netinet/ip6.h>
+#include "cutils/properties.h"
 
 #define LOG_TAG "CommandListener"
 
@@ -1380,7 +1378,8 @@ CommandListener::RouteCmd::RouteCmd() :
 int CommandListener::RouteCmd::runCommand(SocketClient *cli,
                                           int argc, char **argv) {
     if (argc < 5) {
-        cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
+        cli->sendMsg(ResponseCode::CommandSyntaxError,
+                    "Missing argument", false);
         return 0;
     }
 
@@ -1404,7 +1403,7 @@ int CommandListener::RouteCmd::runCommand(SocketClient *cli,
         if (!strcmp(argv[1], "replace")) {
             if (argc != 7 && argc != 8) {
                 cli->sendMsg(ResponseCode::CommandSyntaxError,
-                   "Usage: route replace src family <interface>"
+                   "Usage: route replace src inet_family <interface>"
                    " <ipaddr> <routeId> [<gateway>]", false);
                 return 0;
             }
@@ -1418,27 +1417,11 @@ int CommandListener::RouteCmd::runCommand(SocketClient *cli,
 
             struct in_addr addr;
             int prefix_length;
-            int structsz = (domain==AF_INET) ?
-                    sizeof(struct in_addr) : sizeof(struct in6_addr);
-            unsigned char s[structsz], g[structsz];
             unsigned flags = 0;
 
-            /* verify if interface is UP */
             ifc_init();
-            if (ifc_get_info(argv[4], &addr.s_addr, &prefix_length, &flags) ||
-                            !(flags & IFF_UP)) {
-                cli->sendMsg(ResponseCode::CommandParameterError,
-                             "Interface is down|not found", false);
-                ifc_close();
-                return 0;
-            }
+            ifc_get_info(argv[4], &addr.s_addr, &prefix_length, &flags);
             ifc_close();
-
-            if (inet_pton(domain, argv[5], s) < 1) {
-                cli->sendMsg(ResponseCode::CommandParameterError,
-                             "Invalid src address", false);
-                return 0;
-            }
 
             char *iface = argv[4],
                  *srcPrefix = argv[5],
@@ -1446,15 +1429,8 @@ int CommandListener::RouteCmd::runCommand(SocketClient *cli,
                  *network = NULL,
                  *gateway = NULL;
 
-            if (argc > 7) {
-                if (inet_pton(domain, argv[7], g) < 1) {
-                    cli->sendMsg(ResponseCode::CommandParameterError,
-                                 "Invalid gateway address", false);
-                    return 0;
-                } else {
-                    gateway = argv[7];
-                }
-            }
+            if (argc > 7)
+                gateway = argv[7];
 
             // compute the network block in CIDR notation (for IPv4 only)
             if (domain == AF_INET) {
@@ -1468,36 +1444,35 @@ int CommandListener::RouteCmd::runCommand(SocketClient *cli,
                 asprintf(&network, "%s/%d", net_s, prefix_length);
             }
 
-            char *tmp = NULL;
-            if (sRouteCtrl->repSrcRoute(iface, srcPrefix,
-                                    gateway, routeId, ipVer) != 0) {
-                asprintf(&tmp,"failed to set route for route id [%s]",routeId);
-                cli->sendMsg(ResponseCode::OperationFailed,tmp,true);
+            std::string res = sRouteCtrl->repSrcRoute( iface,
+                                                       srcPrefix,
+                                                       gateway,
+                                                       routeId,
+                                                       ipVer);
+            if (!res.empty()) {
+                cli->sendMsg(ResponseCode::OperationFailed, res.c_str(), false);
             } else {
                 if (network != NULL) {
-                     // gateway should be null as traffic is on same subnet
-                    if (sRouteCtrl->addDstRoute(iface, network, NULL, routeId) != 0) {
-                        asprintf(&tmp,
-                             "source route replace succeeded for route id [%s]"
-                             ", but local destination routing failed", routeId);
-                    } else {
-                        asprintf(&tmp,
-                             "source route replace succeeded for route id [%s]"
-                             ", and local destination routing succeeded", routeId);
+                     //gateway is null for link local route, metric is 0
+                    res = sRouteCtrl->addDstRoute(iface,
+                                network, NULL, 0, routeId);
+                    if (res.empty()) {
+                        res = "source route replace & local subnet "
+                              "route add succeeded for rid: ";
+                        res += routeId;
                     }
-                    cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+                    cli->sendMsg(ResponseCode::CommandOkay, res.c_str(), false);
                 } else {
-                    asprintf(&tmp,
-                         "source route replace succeeded for route id [%s]", routeId);
-                    cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+                    res = "source route replace succeeded for rid:";
+                    res += routeId;
+                    cli->sendMsg(ResponseCode::CommandOkay, res.c_str(), false);
                 }
             }
             free(network);
-            free(tmp);
         } else if (!strcmp(argv[1], "del")) {
             if (argc != 5) {
                 cli->sendMsg(ResponseCode::CommandSyntaxError,
-                             "Usage: route src del v[4|6] <routeId>", false);
+                            "Usage: route del src v[4|6] <routeId>", false);
                 return 0;
             }
 
@@ -1505,30 +1480,23 @@ int CommandListener::RouteCmd::runCommand(SocketClient *cli,
 
             if ((rid < 1) || (rid > 252)) {
                 cli->sendMsg(ResponseCode::CommandParameterError,
-                             "RouteID: between 0 and 253", false);
+                            "RouteID: between 0 and 253", false);
                 return 0;
             }
 
-            char *tmp = NULL;
-
-            if (sRouteCtrl->delSrcRoute(argv[4], ipVer) != 0) {
-                asprintf(&tmp,
-                    "failed to delete source route for route id [%s]",argv[4]);
-                cli->sendMsg(ResponseCode::OperationFailed,tmp, true);
+            std::string res = sRouteCtrl->delSrcRoute(argv[4], ipVer);
+            if (!res.empty()) {
+                cli->sendMsg(ResponseCode::OperationFailed, res.c_str(), false);
             } else {
-                asprintf(&tmp,
-                    "source route delete succeeded for route id [%s]",argv[4]);
-                cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+                res = "source route delete succeeded for rid:";
+                res += argv[4];
+                cli->sendMsg(ResponseCode::CommandOkay, res.c_str(), false);
             }
-            free(tmp);
-
         } else {
             cli->sendMsg(ResponseCode::CommandSyntaxError,
-                         "permitted operation: <replace|del>", false);
+                        "permitted operation for src routes: <replace|del>",
+                        false);
         }
-
-        return 0;
-
     } else if (!strcmp(argv[2], "def")) {
         /* default route configuration */
         if (!strcmp(argv[1], "replace")) {
@@ -1539,161 +1507,98 @@ int CommandListener::RouteCmd::runCommand(SocketClient *cli,
                 return 0;
             }
 
-            struct in_addr addr;
-            int prefixLength;
-            int structsz = (domain==AF_INET) ?
-                    sizeof(struct in_addr) : sizeof(struct in6_addr);
-            unsigned char g[structsz];
-            unsigned flags = 0;
-
-            /* verify if interface is UP */
-            ifc_init();
-            if (ifc_get_info(argv[4], &addr.s_addr, &prefixLength, &flags) ||
-                            !(flags & IFF_UP)) {
-                cli->sendMsg(ResponseCode::CommandParameterError,
-                             "Interface is down|not found", false);
-                return 0;
-            }
-	    ifc_close();
-
             char *iface = argv[4],
                  *gateway = NULL;
 
-            if (argc > 5) {
-                if (inet_pton(domain, argv[5], g) < 1) {
-                    cli->sendMsg(ResponseCode::CommandParameterError,
-                                 "Invalid gateway address", false);
-                    return 0;
-                } else {
-                    gateway = argv[5];
-                }
-            }
+            if (argc > 5)
+                gateway = argv[5];
 
-            char *tmp = NULL;
-
-            if (sRouteCtrl->replaceDefRoute(iface, gateway, ipVer) != 0) {
-                asprintf(&tmp,"failed to replace default route"
-                                " for [%s %s]", iface, ipVer);
-                cli->sendMsg(ResponseCode::OperationFailed,tmp,true);
+            std::string res =
+                sRouteCtrl->replaceDefRoute(iface, gateway, ipVer);
+            if (!res.empty()) {
+                cli->sendMsg(ResponseCode::OperationFailed, res.c_str(), false);
             } else {
-                asprintf(&tmp,"default route replace succeeded "
-                                "for [%s %s]", iface, ipVer);
-                cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+                cli->sendMsg(ResponseCode::CommandOkay,
+                            "default route replace succeeded", false);
             }
-            free(tmp);
+        } else if (!strcmp(argv[1], "add")) {
+            if ((argc !=6) && (argc != 7)) {
+                cli->sendMsg(ResponseCode::CommandSyntaxError,
+                        "Usage: route add def v[4|6]"
+                        " <interface> <metric> [<gateway>]", false);
+                return 0;
+            }
 
+            char *iface = argv[4],
+                 *gateway = NULL;
+            int metric = atoi(argv[5]);
+
+            if (argc > 6)
+                gateway = argv[6];
+
+            std::string res =
+                sRouteCtrl->addDefRoute(iface, gateway, ipVer, metric);
+            if (!res.empty()) {
+                cli->sendMsg(ResponseCode::OperationFailed, res.c_str(), false);
+            } else {
+                cli->sendMsg(ResponseCode::CommandOkay,
+                            "default route add with metric succeeded", false);
+            }
         } else {
             cli->sendMsg(ResponseCode::CommandSyntaxError,
-                         "Permitted action for def routes <replace>", false);
+                         "Permitted action for def routes <replace|add>",
+                         false);
         }
-
     } else if (!strcmp(argv[2], "dst")) {
         /* destination based route configuration */
         if (!strcmp(argv[1], "add")) {
-            if (argc != 6 && argc != 7) {
+            if (argc != 7 && argc != 8) {
                 cli->sendMsg(ResponseCode::CommandSyntaxError,
-                   "Usage: route dst add v[4|6]"
-                   " <interface> <ipaddr> [<gateway>]", false);
-                return 0;
-            }
-
-            struct in_addr addr;
-            int prefixLength;
-            int structsz = (domain==AF_INET) ?
-                    sizeof(struct in_addr) : sizeof(struct in6_addr);
-            unsigned char d[structsz], g[structsz];
-            unsigned flags = 0;
-
-            /* verify if interface is UP */
-            ifc_init();
-            if (ifc_get_info(argv[4], &addr.s_addr, &prefixLength, &flags) ||
-                            !(flags & IFF_UP)) {
-                cli->sendMsg(ResponseCode::CommandParameterError,
-                             "Interface is down|not found", false);
-                return 0;
-            }
-            ifc_close();
-
-            if (inet_pton(domain, argv[5], d) < 1) {
-                cli->sendMsg(ResponseCode::CommandParameterError,
-                             "Invalid dst address", false);
+                   "Usage: route add dst v[4|6]"
+                   " <interface> <metric> <dstIpAddr> [<gateway>]", false);
                 return 0;
             }
 
             char *iface = argv[4],
-                 *dstPrefix = argv[5],
+                 *dstPrefix = argv[6],
                  *gateway = NULL;
+            int metric = atoi(argv[5]);
 
-            if (argc > 6) {
-                if (inet_pton(domain, argv[6], g) < 1) {
-                    cli->sendMsg(ResponseCode::CommandParameterError,
-                                 "Invalid gateway address", false);
-                    return 0;
-                } else {
-                    gateway = argv[6];
-                }
+            if (argc > 7)
+                gateway = argv[7];
+
+            std::string res =
+                sRouteCtrl->addDstRoute(iface, dstPrefix, gateway, metric);
+            if (!res.empty()) {
+                cli->sendMsg(ResponseCode::OperationFailed, res.c_str(), false);
+            } else {
+                cli->sendMsg(ResponseCode::CommandOkay,
+                            "destination route add succeeded", false);
             }
-
-            char *tmp = NULL;
-
-            //FIXME remove comments once IPV6 kernel issues for default routes are
-            //resolved. Until then ignore preexisting route addition error.Ignore
-            //the error here, rather than in RouteController since the validity of
-            //arguments is performed here.
-            /*if (*/sRouteCtrl->addDstRoute(iface, dstPrefix, gateway);/* != 0) {
-                asprintf(&tmp,"failed to set route for destination "
-                              "[%s %s]", iface, dstPrefix);
-                cli->sendMsg(ResponseCode::OperationFailed,tmp,true);
-            } else {*/
-                asprintf(&tmp,"destination route add succeeded "
-                              "for [%s %s]",iface, dstPrefix);
-                cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
-            /*}*/
-            free(tmp);
         } else if (!strcmp(argv[1], "del")) {
             if (argc != 5) {
                 cli->sendMsg(ResponseCode::CommandSyntaxError,
-                             "Usage: route dst del v[4|6] <ipaddr>", false);
+                             "Usage: route del dst v[4|6] <ipaddr>", false);
                 return 0;
             }
 
-            int structsz = (domain==AF_INET) ?
-                    sizeof(struct in_addr) : sizeof(struct in6_addr);
-            unsigned char d[structsz];
-
-            if (inet_pton(domain, argv[4], d) < 1) {
-                cli->sendMsg(ResponseCode::CommandParameterError,
-                             "Invalid destination address", false);
-                return 0;
-            }
-
-            char *tmp = NULL;
-
-            if (sRouteCtrl->delDstRoute(argv[4]) != 0) {
-                asprintf(&tmp, "failed to delete destination "
-                               "route for [%s]", argv[4]);
-                cli->sendMsg(ResponseCode::OperationFailed,tmp, true);
+            std::string res = sRouteCtrl->delDstRoute(argv[4]);
+            if (!res.empty()){
+                cli->sendMsg(ResponseCode::OperationFailed, res.c_str(), false);
             } else {
-                asprintf(&tmp,
-                    "destination route delete succeeded for [%s]", argv[4]);
-                cli->sendMsg(ResponseCode::CommandOkay,tmp,false);
+                cli->sendMsg(ResponseCode::CommandOkay,
+                            "destination route delete succeeded", false);
             }
-            free(tmp);
-
         } else {
             cli->sendMsg(ResponseCode::CommandSyntaxError,
-                         "permitted operation: <add|del>", false);
+                         "permitted operation for dst routes: <add|del>",
+                         false);
         }
-
-        return 0;
-
     } else {
         cli->sendMsg(ResponseCode::CommandParameterError,
-                     "host routes: <src|dst|def>",false);
+                     "allowed route types: <src|dst|def>", false);
     }
-
     return 0;
-
 }
 
 CommandListener::RtSolCmd::RtSolCmd() :
