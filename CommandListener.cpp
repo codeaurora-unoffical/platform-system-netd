@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (c) 2012 Code Aurora Forum. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +27,18 @@
 #include <string.h>
 #include <fcntl.h>
 #include <linux/if.h>
+#include "cutils/properties.h"
+
+
+
+#include <linux/if_ether.h>
+#include <linux/if_packet.h>
+#include <netinet/icmp6.h>
+#include <netinet/ip6.h>
+#include <linux/filter.h>
+#include <linux/sockios.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 
 #define LOG_TAG "CommandListener"
 
@@ -70,6 +83,7 @@ CommandListener::CommandListener() :
     registerCmd(new IdletimerControlCmd());
     registerCmd(new ResolverCmd());
     registerCmd(new RouteCmd());
+    registerCmd(new RtSolCmd());
 
     if (!sSecondaryTableCtrl)
         sSecondaryTableCtrl = new SecondaryTableController();
@@ -1495,4 +1509,390 @@ int CommandListener::RouteCmd::runCommand(SocketClient *cli, int argc, char **ar
                      "allowed route types: <src|dst|def>", false);
     }
     return 0;
+}
+
+CommandListener::RtSolCmd::RtSolCmd() :
+                 NetdCommand("rtsol") {
+}
+
+/*
+ * Usage for this API is "rtsol <iface_name>"
+ * return value is "<gateway_addr> <lease_time>"
+ */
+int CommandListener::RtSolCmd::runCommand(SocketClient *cli,
+                                          int argc, char **argv) {
+    if (argc < 2) {
+        cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
+        return -1;
+    }
+
+    if (strcmp(argv[0], "rtsol")) {
+        cli->sendMsg(ResponseCode::CommandSyntaxError,
+                     "Usage: rtsol <interface name>", false);
+        return -1;
+    }
+
+    char * netIf = argv[1];
+    int ra_sock_fd = -1;
+    int rs_sock_fd = -1;
+    int ret = -1;
+
+    do {
+        /* Create socket for sending Router Soicitation */
+        if ((rs_sock_fd = createRsSocket(netIf)) < 0) {
+            ALOGE("create RS socket() failed:%s", strerror(errno));
+            ret -1;
+            break;
+        }
+        /* Create and bind socket for receiving Router Advertisement */
+        if ((ra_sock_fd = createRaSocket(netIf)) < 0) {
+            ALOGE("create RA socket() failed:%s", strerror(errno));
+            ret = -1;
+            break;
+        }
+
+        char gateway[INET6_ADDRSTRLEN + 1];
+        char *tmp = NULL;
+        unsigned int lease = 0;
+        ret = getGateway(rs_sock_fd, ra_sock_fd, netIf, gateway, &lease);
+
+        if (ret) {
+           ALOGE("error retrieving ipv6 gateway:%s", strerror(errno));
+            cli->sendMsg(ResponseCode::OperationFailed, strerror(errno), false);
+            return -1;
+        }
+
+        ALOGD("Gateway found:%s", gateway);
+
+        asprintf(&tmp, "%s %d", gateway, lease);
+        cli->sendMsg(ResponseCode::CommandOkay, tmp, false);
+        free(tmp);
+        ret = 0;
+    } while(0);
+
+    if (ra_sock_fd != -1) {
+        close(ra_sock_fd);
+    }
+    if (rs_sock_fd != -1) {
+        close(rs_sock_fd);
+    }
+    return ret;
+}
+
+/*
+ * Retrieves the value of the property specified by the
+ * key. Negative and zero values are considered invalid
+ * by this method.
+ * If an invalid value is retrieved, the default
+ * value will be returned, if present, else it will return 0.
+ */
+int CommandListener::RtSolCmd::getProperty(const char * const propertyKey,
+                                                const char * const defaultValue) {
+    char property[PROPERTY_VALUE_MAX];
+    int retProperty = 0;
+
+    property_get(propertyKey, property, defaultValue);
+
+   ALOGD("%s read as:%s", propertyKey, property);
+    retProperty = atoi(property);
+    if (retProperty <= 0)
+    {
+       ALOGE("Invalid value for %s = %d, using default: %s",
+                propertyKey, retProperty, defaultValue);
+        retProperty = atoi(defaultValue);
+    }
+
+    return retProperty;
+}
+
+int CommandListener::RtSolCmd::getGateway(int rs_sock_fd,
+                                        int ra_sock_fd,
+                                        char * netIf,
+                                        char *gateway,
+                                        unsigned int *lease) {
+    int RS_SEND_COUNT = 0;          // # of RS to send
+    int RS_SEND_INTERVAL_MS = 0;    // Wait in milliseconds for RS
+    int RA_WAIT_TIMEOUT_SEC = 0;    // Wait in seconds for RA
+    int IF_BRINGUP_WAIT_SEC = 0;    // Period to wait for the interface to be brought up
+    int IF_BRINGUP_WAIT_COUNT = 0;  // # of iterations where we wait for the interface to
+                                    // brought up.
+    const char * const RS_SEND_COUNT_DEFAULT = "5";
+    const char * const RA_WAIT_TIMEOUT_DEFAULT = "5";
+    const char * const RS_SEND_INTERVAL_DEFAULT_MS = "500";
+    const char * const IF_BRINGUP_WAIT_DEFAULT = "1";
+    const char * const IF_BRINGUP_WAIT_COUNT_DEFAULT = "5";
+
+    // Number of solicitations to be sent
+    RS_SEND_COUNT = getProperty("persist.wifi.v6.rs.count", RS_SEND_COUNT_DEFAULT);
+   ALOGD("RS_SEND_COUNT = %d", RS_SEND_COUNT);
+
+    // Wait timeout for RA
+    RA_WAIT_TIMEOUT_SEC = getProperty("persist.wifi.v6.rs.timeout", RA_WAIT_TIMEOUT_DEFAULT);
+   ALOGD("RA timeout period = %d s", RA_WAIT_TIMEOUT_SEC);
+
+    // Wait timeout for RS
+    RS_SEND_INTERVAL_MS = getProperty("persist.wifi.v6.rs.retry", RS_SEND_INTERVAL_DEFAULT_MS);
+   ALOGD("RS timeout period = %d s", RS_SEND_INTERVAL_MS);
+
+    // Wait timeout for RA
+    IF_BRINGUP_WAIT_SEC = getProperty("persist.wifi.v6.if.timeout", IF_BRINGUP_WAIT_DEFAULT);
+   ALOGD("IF bring up wait period is = %d s", IF_BRINGUP_WAIT_SEC);
+
+    IF_BRINGUP_WAIT_COUNT = getProperty("persist.wifi.v6.if.retry", IF_BRINGUP_WAIT_COUNT_DEFAULT);
+   ALOGD("IF bring up wait period is = %d s", IF_BRINGUP_WAIT_COUNT);
+
+    struct icmp6_hdr router_solicit;
+    struct sockaddr_in6 dest6;
+    struct timeval to;
+    int rc = 0;
+    int ret = -1;
+    int errorCount = 0;
+    int ifIndex = 0;
+
+    // Make sure the interface is up before proceeding
+    for ( errorCount = 0; errorCount < IF_BRINGUP_WAIT_COUNT; errorCount++) {
+        ifIndex = if_nametoindex(netIf);
+
+        if (!ifIndex) {
+            // Sleep to give the interface time to be brought up
+           ALOGE("Interface is not up. Waiting %d seconds", IF_BRINGUP_WAIT_SEC);
+            sleep(IF_BRINGUP_WAIT_SEC);
+        } else {
+           ALOGE("Interface is up. Index is %d", ifIndex);
+            break;
+        }
+    }
+
+    if (errorCount == IF_BRINGUP_WAIT_COUNT) {
+       ALOGE("TIMEOUT waiting for interface to come up. Bailing!");
+        return -1;
+    }
+
+
+    router_solicit.icmp6_type = ND_ROUTER_SOLICIT;
+    router_solicit.icmp6_code = 0;
+
+    memset(&dest6, 0, sizeof(dest6));
+    inet_pton(AF_INET6, "FF02::2", &dest6.sin6_addr);
+    dest6.sin6_family = AF_INET6;
+    dest6.sin6_scope_id = ifIndex;
+
+    errorCount = 0;
+
+    for (int i = 0; i < RS_SEND_COUNT; i++) {
+       ALOGE("sending router solicitation #%d", i+1);
+
+        if (sendto(rs_sock_fd,
+                   &router_solicit,
+                   sizeof(router_solicit),
+                   0,
+                   (struct sockaddr *)&dest6,
+                   sizeof(dest6)) < 0) {
+           ALOGE("router solicitation sendto() failed:%s", strerror(errno));
+            errorCount++;
+            // If all send attempts failed, return error
+            if (errorCount == RS_SEND_COUNT) {
+                return -1;
+            } else {
+                /*
+                 * The following sleep / retry fallback is necessary due to
+                 * DAD (Duplicate Address Detection) procedure.
+                 * Once an IPv6 host has configured its addresses, it must perform DAD
+                 * to ensure that its configured addresses are unique on the link.
+                 * Therefore 'usleep()' here accommodates for the DAD procedure.
+                 *
+                 * By setting the following values to '0', DAD is not performed and
+                 * 'usleep()' may not be necessary.
+                 * - sysctl -w net.ipv6.conf.all.accept_dad=0
+                 * - sysctl -w net.ipv6.conf.default.accept_dad=0
+                 * - sysctl -w net.ipv6.conf.wlan0.accept_dad=0
+                 */
+                usleep(RS_SEND_INTERVAL_MS * 1000);
+                continue;
+            }
+        }
+
+       ALOGE("Waiting for Router Advertisement #%d", i + 1);
+
+        bool isFound = false;
+        fd_set read_fds;
+
+        while(1) {
+            FD_ZERO(&read_fds);
+            FD_SET(ra_sock_fd, &read_fds);
+            to.tv_sec = RA_WAIT_TIMEOUT_SEC;
+            to.tv_usec = 0;
+
+
+            if ((rc = select(ra_sock_fd + 1, &read_fds, NULL, NULL, &to)) < 0) {
+               ALOGE("select failed: %s", strerror(errno));
+                ret = -1;
+                break;
+            } else if (!rc) {
+               ALOGE("[TIMEOUT]");
+                ret = -1;
+                break;
+            } else if (FD_ISSET(ra_sock_fd, &read_fds)) {
+                char recvBuf[4096];
+                if ((rc = read(ra_sock_fd, recvBuf, sizeof(recvBuf))) <= 0) {
+                    if (rc == 0) {
+                       ALOGE("Lost connection!");
+                    } else {
+                       ALOGE("Error reading data (%s)", strerror(errno));
+                    }
+                    ret = -1;
+                    break;
+                } else {
+                    // Look for a router advertisement
+                    int ETH_PKT_OFFSET = 14;
+                    int minPacketSize = sizeof(struct ip6_hdr) +
+                                            sizeof(struct nd_router_advert) + ETH_PKT_OFFSET;
+                    if (rc < minPacketSize) {
+                        continue;
+                    }
+
+                    struct ip6_hdr *ip6hdr = (struct ip6_hdr*)(recvBuf + ETH_PKT_OFFSET);
+                    struct nd_router_advert *ra =
+                                    (struct nd_router_advert*)(recvBuf + ETH_PKT_OFFSET + sizeof(struct ip6_hdr));
+
+                    if (ra->nd_ra_type != ND_ROUTER_ADVERT &&
+                            ra->nd_ra_router_lifetime == 0) {
+                        continue;
+                    }
+
+                    char saddr[INET6_ADDRSTRLEN + 1];
+                    const char *srcAddr = inet_ntop(AF_INET6, &ip6hdr->ip6_src,
+                                                            saddr, INET6_ADDRSTRLEN);
+                   ALOGE("Found a gateway:%s", srcAddr);
+
+                    memcpy(gateway, srcAddr, strlen(srcAddr));
+                    gateway[strlen(srcAddr)] = '\0';
+
+                    *lease = ntohs(ra->nd_ra_router_lifetime);
+                   ALOGE("lease time:%d", *lease);
+                    isFound = true;
+                    ret = 0;
+                    break;
+                }
+            }
+        }
+
+        if (isFound) {
+            break;
+        }
+    }
+
+    return ret;
+}
+
+/**
+ * Create a socket to send Router solicitations
+ */
+int CommandListener::RtSolCmd::createRsSocket(char * netIf) {
+    int sock_fd = -1;
+    int HOP_LIMIT = 255;
+
+    if ((sock_fd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)) < 0) {
+     ALOGE("router solicitation socket() failed:%s", strerror(errno));
+      return -1;
+    }
+
+    ALOGD("router solicitation setting hoplimit=%d", HOP_LIMIT);
+
+    /* Set the multicast hop limit */
+    if (setsockopt(sock_fd,
+                IPPROTO_IPV6,
+                IPV6_MULTICAST_HOPS,
+                (char *) &HOP_LIMIT,
+                sizeof(HOP_LIMIT)) == -1) {
+         ALOGE("router solicitation setsockopt() failed to set hop limit:%s", strerror(errno));
+         close(sock_fd);
+         return -1;
+    }
+
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_BINDTODEVICE, netIf, strlen(netIf)) < 0) {
+        ALOGE("router solicitation setsockopt():%s", strerror(errno));
+        close(sock_fd);
+        return -1;
+    }
+
+    return sock_fd;
+}
+
+/**
+ * Create a packet socket to capture ICMPv6
+ */
+int CommandListener::RtSolCmd::createRaSocket(char *netIf) {
+    int sock_fd = -1;
+    int ret = -1;
+    int ifIndex = if_nametoindex(netIf);
+    struct sockaddr_ll sa;
+
+    // icmpv6 filter format auto generated by
+    // tcpdump -dd 'icmp6 and ip6[6]=0x3a and ip6[40]=134' -i <interface name>
+    struct sock_filter filter[] = {
+        { 0x28, 0, 0, 0x0000000c },
+        { 0x15, 0, 6, 0x000086dd },
+        { 0x30, 0, 0, 0x00000014 },
+        { 0x15, 0, 4, 0x0000003a },
+        { 0x15, 0, 3, 0x0000003a },
+        { 0x30, 0, 0, 0x00000036 },
+        { 0x15, 0, 1, 0x00000086 },
+        { 0x6, 0, 0, 0x00000060 },
+        { 0x6, 0, 0, 0x00000000 },
+    };
+
+    struct sock_fprog fprog;
+    fprog.len = sizeof(filter)/sizeof(struct sock_filter);
+    fprog.filter = filter;
+
+    if (!netIf) {
+        ALOGE("bad parameters received");
+        return ret;
+    }
+
+    ALOGD("creating packet socket for iface %s", netIf);
+
+    do {
+        /* create packet socket */
+        sock_fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IPV6));
+        if(sock_fd < 0) {
+            ALOGE("socket creation failed. sock_fd=%d, errno=%s", sock_fd, strerror(errno));
+            break;
+        }
+        ALOGE("socket %d successfully created", sock_fd);
+
+        /* bind this socket to specific iface */
+        sa.sll_family = AF_PACKET;
+        sa.sll_protocol = htons(ETH_P_IPV6);
+        sa.sll_ifindex = ifIndex;
+
+        /* need to cast sa to sockaddr because bind expects that type */
+        if (bind(sock_fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+            ALOGE("couldn't bind socket %d to iface %d, errno=%s",
+                 sock_fd, ifIndex, strerror(errno));
+            break;
+        }
+
+        /* install filter to only receive ICMPv6 traffic */
+        if (setsockopt(sock_fd,
+                     SOL_SOCKET,
+                     SO_ATTACH_FILTER,
+                     &fprog,
+                     sizeof(fprog)) == -1) {
+            ALOGE("couldn't attach BPF filter on sock_fd %d, error=%s", sock_fd, strerror(errno));
+            break;
+        }
+
+        ret = sock_fd;
+    } while(0);
+
+    if(ret == -1) {
+        if(sock_fd != -1) {
+            ALOGE("closing socket %d", sock_fd);
+            close(sock_fd);
+        }
+    }
+
+    return ret;
 }
