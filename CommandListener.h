@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (c) 2012 Code Aurora Forum. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -137,6 +138,18 @@ private:
         RouteCmd();
         virtual ~RouteCmd() {}
         int runCommand(SocketClient *c, int argc, char ** argv);
+    };
+
+    class RtSolCmd : public NetdCommand {
+    public:
+        RtSolCmd();
+        virtual ~RtSolCmd() {}
+        int runCommand(SocketClient *c, int argc, char ** argv);
+    private:
+        int sendRs(char *netIf);
+        int getGateway(char *netIf, char *gateway, unsigned int *lease);
+        int createRaSocket(int ifIndex, char *netIf);
+
     };
 };
 
