@@ -35,6 +35,7 @@
 
 #define LOG_TAG "SoftapController"
 #include <cutils/log.h>
+#include <cutils/properties.h>
 #include <netutils/ifc.h>
 #include <private/android_filesystem_config.h>
 #include "wifi.h"
@@ -47,6 +48,7 @@
 #define WIFI_DEFAULT_CHANNEL    6
 
 static const char HOSTAPD_CONF_FILE[]    = "/data/misc/wifi/hostapd.conf";
+static char ath6kl_supported[PROPERTY_VALUE_MAX];
 
 SoftapController::SoftapController() {
     mPid = 0;
@@ -187,7 +189,11 @@ int SoftapController::startSoftap() {
     }
 
 #ifdef QCOM_WLAN
-    qsap_set_ini_filename();
+    property_get("wlan.driver.ath", ath6kl_supported, 0);
+    if (*ath6kl_supported == '0')
+    {
+       qsap_set_ini_filename();
+    }
 #endif
 #ifdef HAVE_HOSTAPD
     if ((pid = fork()) < 0) {
@@ -198,10 +204,22 @@ int SoftapController::startSoftap() {
     if (!pid) {
 #ifdef HAVE_HOSTAPD
         ensure_entropy_file_exists();
-        if (execl("/system/bin/hostapd", "/system/bin/hostapd",
-                  "-e", WIFI_ENTROPY_FILE,
-                  HOSTAPD_CONF_FILE, (char *) NULL)) {
-            LOGE("execl failed (%s)", strerror(errno));
+
+        property_get("wlan.driver.ath", ath6kl_supported, 0);
+        if (*ath6kl_supported == '1')
+        {
+            if (execl("/system/bin/wpa_supplicant", "/system/bin/wpa_supplicant",
+                "-e", WIFI_ENTROPY_FILE, "-iwlan0", "-Dnl80211",
+                "-c/data/misc/wifi/hostapd.conf", "-ddd", (char *) NULL)) {
+                LOGE("execl failed (%s)", strerror(errno));
+            }
+
+        } else {
+            if (execl("/system/bin/hostapd", "/system/bin/hostapd",
+                      "-e", WIFI_ENTROPY_FILE,
+                      HOSTAPD_CONF_FILE, (char *) NULL)) {
+                LOGE("execl failed (%s)", strerror(errno));
+            }
         }
 #endif
         LOGE("Should never get here!");
@@ -291,7 +309,11 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
     strncpy(mIface, argv[3], sizeof(mIface));
     iface = argv[2];
 #ifdef QCOM_WLAN
-    return qsapsetSoftap(argc, argv);
+    property_get("wlan.driver.ath", ath6kl_supported, 0);
+    if (*ath6kl_supported == '0')
+    {
+        return qsapsetSoftap(argc, argv);
+    }
 #endif
 
 #ifdef HAVE_HOSTAPD
@@ -305,28 +327,45 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
         ssid = (char *)"AndroidAP";
     }
 
-    channel_num = (argc > 7) ? atoi(argv[7]) : WIFI_DEFAULT_CHANNEL;
-
-    if (channel_num > 14){
-        asprintf(&wbuf, "interface=%s\ndriver=nl80211\nctrl_interface="
-                "/data/misc/wifi/hostapd\nssid=%s\nchannel=%d\nhw_mode=a\n", iface, ssid, channel_num);
-    } else {
-        asprintf(&wbuf, "interface=%s\ndriver=nl80211\nctrl_interface="
-                "/data/misc/wifi/hostapd\nssid=%s\nchannel=%d\n", iface, ssid, channel_num);
-    }
-
-    if (argc > 5) {
-        if (!strcmp(argv[5], "wpa-psk")) {
-            generatePsk(ssid, argv[6], psk_str);
-            asprintf(&fbuf, "%swpa=1\nwpa_pairwise=TKIP CCMP\nwpa_psk=%s\n", wbuf, psk_str);
-        } else if (!strcmp(argv[5], "wpa2-psk")) {
-            generatePsk(ssid, argv[6], psk_str);
-            asprintf(&fbuf, "%swpa=2\nrsn_pairwise=CCMP\nwpa_psk=%s\n", wbuf, psk_str);
-        } else if (!strcmp(argv[5], "open")) {
+    property_get("wlan.driver.ath", ath6kl_supported, 0);
+    if (*ath6kl_supported == '1')
+    {
+        asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\n}key_mgmt=NONE\n}\n", ssid);
+        if (argc > 5) {
+             if (!strcmp(argv[5], "wpa-psk")) {
+                 asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\nkey_mgmt=WPA-PSK\npsk=\"%s\"\npairwise=TKIP\n}\n", ssid,argv[6]);
+             } else if (!strcmp(argv[5], "wpa2-psk")) {
+                 asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\nkey_mgmt=WPA-PSK\npsk=\"%s\"\npairwise=CCMP\n}\n", ssid,argv[6]);
+             } else if (!strcmp(argv[5], "open")) {
+                 asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\nkey_mgmt=NONE\n}\n", ssid);
+             }
+        } else {
             asprintf(&fbuf, "%s", wbuf);
         }
     } else {
-        asprintf(&fbuf, "%s", wbuf);
+        channel_num = (argc > 7) ? atoi(argv[7]) : WIFI_DEFAULT_CHANNEL;
+
+        if (channel_num > 14) {
+            asprintf(&wbuf, "interface=%s\ndriver=nl80211\nctrl_interface="
+                     "/data/misc/wifi/hostapd\nssid=%s\nchannel=%d\nhw_mode=a\n", iface, ssid, channel_num);
+        } else {
+            asprintf(&wbuf, "interface=%s\ndriver=nl80211\nctrl_interface="
+                     "/data/misc/wifi/hostapd\nssid=%s\nchannel=%d\n", iface, ssid, channel_num);
+        }
+
+        if (argc > 5) {
+            if (!strcmp(argv[5], "wpa-psk")) {
+                generatePsk(ssid, argv[6], psk_str);
+                asprintf(&fbuf, "%swpa=1\nwpa_pairwise=TKIP CCMP\nwpa_psk=%s\n", wbuf, psk_str);
+            } else if (!strcmp(argv[5], "wpa2-psk")) {
+                generatePsk(ssid, argv[6], psk_str);
+                asprintf(&fbuf, "%swpa=2\nrsn_pairwise=CCMP\nwpa_psk=%s\n", wbuf, psk_str);
+            } else if (!strcmp(argv[5], "open")) {
+                asprintf(&fbuf, "%s", wbuf);
+            }
+        } else {
+            asprintf(&fbuf, "%s", wbuf);
+        }
     }
 
     fd = open(HOSTAPD_CONF_FILE, O_CREAT | O_TRUNC | O_WRONLY, 0660);
