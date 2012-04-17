@@ -27,21 +27,17 @@
 #include <string.h>
 #include <fcntl.h>
 #include <linux/if.h>
-#include <netinet/icmp6.h>
-#include <netinet/ip6.h>
 #include "cutils/properties.h"
 
 
 
-#include <fcntl.h>
-#include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
 #include <netinet/icmp6.h>
 #include <netinet/ip6.h>
 #include <linux/filter.h>
 #include <linux/sockios.h>
-#include<stdio.h>
+#include <stdio.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 
@@ -1704,11 +1700,15 @@ CommandListener::RtSolCmd::RtSolCmd() :
                  NetdCommand("rtsol") {
 }
 
+/*
+ * Usage for this API is "rtsol <iface_name>"
+ * return value is "<gateway_addr> <lease_time>"
+ */
 int CommandListener::RtSolCmd::runCommand(SocketClient *cli,
                                           int argc, char **argv) {
     if (argc < 2) {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
-        return 0;
+        return -1;
     }
 
     if (strcmp(argv[0], "rtsol")) {
@@ -1748,29 +1748,51 @@ int CommandListener::RtSolCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
+/*
+ * Retrieves the value of the property specified by the
+ * key. Negative and zero values are considered invalid
+ * by this method.
+ * If an invalid value is retrieved, the default
+ * value will be returned, if present, else it will return 0.
+ */
+int CommandListener::RtSolCmd::getProperty(const char * const propertyKey,
+                                                const char * const defaultValue) {
+    char property[PROPERTY_VALUE_MAX];
+    int retProperty = 0;
+
+    property_get(propertyKey, property, defaultValue);
+
+    LOGD("%s read as:%s", propertyKey, property);
+    retProperty = atoi(property);
+    if (retProperty <= 0)
+    {
+        LOGE("Invalid value for %s = %d, using default: %s",
+                propertyKey, retProperty, defaultValue);
+        retProperty = atoi(defaultValue);
+    }
+
+    return retProperty;
+}
+
 int CommandListener::RtSolCmd::sendRs(char *netIf) {
     int sock_fd;
     struct icmp6_hdr router_solicit;
     struct sockaddr_in6 dest6;
     int ret = 0;
     int HOP_LIMIT = 255;
-    int RS_SEND_COUNT = 5;
-    int RS_SEND_INTERVAL = 0;
-    const char *RS_SEND_INTERVAL_DEFAULT = "500";
+    int RS_SEND_COUNT = 0;
+    int RS_SEND_INTERVAL_MS = 0;
+    const char * const RS_SEND_INTERVAL_DEFAULT_MS = "500";
+    const char * const RS_SEND_COUNT_DEFAULT = "5";
     int errorCount = 0;
 
-    char prop[PROPERTY_VALUE_MAX];
     // ms to wait in between RS
-    property_get("persist.wifi.v6.rs.retry", prop, RS_SEND_INTERVAL_DEFAULT);
-    LOGD("persist.wifi.v6.rs.retry read as:%s", prop);
-    RS_SEND_INTERVAL = atoi(prop);
-    if (RS_SEND_INTERVAL <= 0)
-    {
-        LOGE("Invalid value for RS_SEND_INTERVAL = %d, using default: %s",
-                RS_SEND_INTERVAL, RS_SEND_INTERVAL_DEFAULT);
-        RS_SEND_INTERVAL = atoi(RS_SEND_INTERVAL_DEFAULT);
-    }
-    LOGD("RS_SEND_INTERVAL = %d", RS_SEND_INTERVAL);
+    RS_SEND_INTERVAL_MS = getProperty("persist.wifi.v6.rs.retry", RS_SEND_INTERVAL_DEFAULT_MS);
+    LOGD("RS_SEND_INTERVAL_MS = %d", RS_SEND_INTERVAL_MS);
+
+    // Number of solicitations to be sent
+    RS_SEND_COUNT = getProperty("persist.wifi.v6.rs.count", RS_SEND_COUNT_DEFAULT);
+    LOGD("RS_SEND_COUNT = %d", RS_SEND_COUNT);
 
     if ((sock_fd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)) < 0) {
       LOGE("router solicitation socket() failed:%s", strerror(errno));
@@ -1815,7 +1837,7 @@ int CommandListener::RtSolCmd::sendRs(char *netIf) {
           LOGE("router solicitation sendto() failed:%s", strerror(errno));
           errorCount++;
         }
-        usleep(RS_SEND_INTERVAL * 1000);
+        usleep(RS_SEND_INTERVAL_MS * 1000);
     }
 
     // If all send attempts failed, return error
@@ -1833,7 +1855,8 @@ int CommandListener::RtSolCmd::getGateway(char *netIf,
     struct sockaddr_in6 dest6;
     int error = 0;
     char recvBuf[4096];
-    int RA_WAIT_TIMEOUT = 5; // Wait in seconds for RA
+    int RA_WAIT_TIMEOUT_SEC = 0; // Wait in seconds for RA
+    const char * const RS_WAIT_TIMEOUT_DEFAULT = "5";
     int ETH_PKT_OFFSET = 14;
     int ifIndex = if_nametoindex(netIf);
 
@@ -1842,10 +1865,12 @@ int CommandListener::RtSolCmd::getGateway(char *netIf,
       return -1;
     }
 
-    LOGD("waiting for router advertisement %d s", RA_WAIT_TIMEOUT);
+    // Wait timeout for RA
+    RA_WAIT_TIMEOUT_SEC = getProperty("persist.wifi.v6.rs.timeout", RS_WAIT_TIMEOUT_DEFAULT);
+    LOGD("waiting for router advertisement %d s", RA_WAIT_TIMEOUT_SEC);
 
     struct timeval to;
-    to.tv_sec = RA_WAIT_TIMEOUT;
+    to.tv_sec = RA_WAIT_TIMEOUT_SEC;
     to.tv_usec = 0;
     int rc = 0;
     int ret = 0;
@@ -1907,7 +1932,7 @@ int CommandListener::RtSolCmd::getGateway(char *netIf,
 }
 
 /**
- * Create a RAW socket to capture ICMPv6
+ * Create a packet socket to capture ICMPv6
  */
 int CommandListener::RtSolCmd::createRaSocket(int ifIndex, char *netIf) {
     int sock_fd = -1;
@@ -1915,12 +1940,15 @@ int CommandListener::RtSolCmd::createRaSocket(int ifIndex, char *netIf) {
     struct sockaddr_ll sa;
 
     // icmpv6 filter format auto generated by
-    // tcpdump -dd icmp6 -i <interface name>
+    // tcpdump -dd 'icmp6 and ip6[6]=0x3a and ip6[40]=134' -i <interface name>
     struct sock_filter filter[] = {
         { 0x28, 0, 0, 0x0000000c },
-        { 0x15, 0, 3, 0x000086dd },
+        { 0x15, 0, 6, 0x000086dd },
         { 0x30, 0, 0, 0x00000014 },
-        { 0x15, 0, 1, 0x0000003a },
+        { 0x15, 0, 4, 0x0000003a },
+        { 0x15, 0, 3, 0x0000003a },
+        { 0x30, 0, 0, 0x00000036 },
+        { 0x15, 0, 1, 0x00000086 },
         { 0x6, 0, 0, 0x00000060 },
         { 0x6, 0, 0, 0x00000000 },
     };
