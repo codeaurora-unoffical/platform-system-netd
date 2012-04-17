@@ -149,6 +149,8 @@ private:
         int sendRs(char *netIf);
         int getGateway(char *netIf, char *gateway, unsigned int *lease);
         int createRaSocket(int ifIndex, char *netIf);
+        int getProperty(const char * const propertyKey,
+                        const char * const defaultValue);
 
     };
 };
