@@ -333,9 +333,11 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
         asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\n}key_mgmt=NONE\n}\n", ssid);
         if (argc > 5) {
              if (!strcmp(argv[5], "wpa-psk")) {
-                 asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\nkey_mgmt=WPA-PSK\npsk=\"%s\"\npairwise=TKIP\n}\n", ssid,argv[6]);
+                 asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\nproto=WPA\nkey_mgmt=WPA-PSK\n"
+                          "psk=\"%s\"\ngroup=TKIP\npairwise=TKIP\n}\n", ssid,argv[6]);
              } else if (!strcmp(argv[5], "wpa2-psk")) {
-                 asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\nkey_mgmt=WPA-PSK\npsk=\"%s\"\npairwise=CCMP\n}\n", ssid,argv[6]);
+                 asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\nproto=RSN\nkey_mgmt=WPA-PSK\n"
+                          "psk=\"%s\"\ngroup=CCMP\npairwise=CCMP\n}\n", ssid,argv[6]);
              } else if (!strcmp(argv[5], "open")) {
                  asprintf(&fbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\nkey_mgmt=NONE\n}\n", ssid);
              }
