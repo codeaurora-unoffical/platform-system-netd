@@ -146,9 +146,11 @@ private:
         virtual ~RtSolCmd() {}
         int runCommand(SocketClient *c, int argc, char ** argv);
     private:
-        int sendRs(char *netIf);
-        int getGateway(char *netIf, char *gateway, unsigned int *lease);
-        int createRaSocket(int ifIndex, char *netIf);
+        int getGateway(int rs_sock_fd, int ra_sock_fd, char * netIf,
+                                       char *gateway,
+                                       unsigned int *lease);
+        int createRaSocket(char *netIf);
+        int createRsSocket(char *netIf);
         int getProperty(const char * const propertyKey,
                         const char * const defaultValue);
 
