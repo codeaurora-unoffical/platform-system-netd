@@ -1717,35 +1717,51 @@ int CommandListener::RtSolCmd::runCommand(SocketClient *cli,
         return -1;
     }
 
+    char * netIf = argv[1];
+    int ra_sock_fd = -1;
+    int rs_sock_fd = -1;
     int ret = -1;
 
-    LOGD("Sending router solicitation...");
-    ret = sendRs(argv[1]);
+    do {
+        /* Create socket for sending Router Soicitation */
+        if ((rs_sock_fd = createRsSocket(netIf)) < 0) {
+            LOGE("create RS socket() failed:%s", strerror(errno));
+            ret -1;
+            break;
+        }
+        /* Create and bind socket for receiving Router Advertisement */
+        if ((ra_sock_fd = createRaSocket(netIf)) < 0) {
+            LOGE("create RA socket() failed:%s", strerror(errno));
+            ret = -1;
+            break;
+        }
 
-    if (ret) {
-        LOGE("error sending router solicitation:%s", strerror(errno));
-        cli->sendMsg(ResponseCode::OperationFailed, strerror(errno), false);
-        return -1;
+        char gateway[INET6_ADDRSTRLEN + 1];
+        char *tmp = NULL;
+        unsigned int lease = 0;
+        ret = getGateway(rs_sock_fd, ra_sock_fd, netIf, gateway, &lease);
+
+        if (ret) {
+            LOGE("error retrieving ipv6 gateway:%s", strerror(errno));
+            cli->sendMsg(ResponseCode::OperationFailed, strerror(errno), false);
+            return -1;
+        }
+
+        LOGD("Gateway found:%s", gateway);
+
+        asprintf(&tmp, "%s %d", gateway, lease);
+        cli->sendMsg(ResponseCode::CommandOkay, tmp, false);
+        free(tmp);
+        ret = 0;
+    } while(0);
+
+    if (ra_sock_fd != -1) {
+        close(ra_sock_fd);
     }
-
-    char gateway[INET6_ADDRSTRLEN + 1];
-    char *tmp = NULL;
-
-    unsigned int lease = 0;
-    ret = getGateway(argv[1], gateway, &lease);
-
-    if (ret) {
-        LOGE("error sending retrieving ipv6 gateway:%s", strerror(errno));
-        cli->sendMsg(ResponseCode::OperationFailed, strerror(errno), false);
-        return -1;
+    if (rs_sock_fd != -1) {
+        close(rs_sock_fd);
     }
-
-    LOGD("Gateway found:%s", gateway);
-
-    asprintf(&tmp, "%s %d", gateway, lease);
-    cli->sendMsg(ResponseCode::CommandOkay, tmp, false);
-    free(tmp);
-    return 0;
+    return ret;
 }
 
 /*
@@ -1774,25 +1790,192 @@ int CommandListener::RtSolCmd::getProperty(const char * const propertyKey,
     return retProperty;
 }
 
-int CommandListener::RtSolCmd::sendRs(char *netIf) {
-    int sock_fd;
-    struct icmp6_hdr router_solicit;
-    struct sockaddr_in6 dest6;
-    int ret = 0;
-    int HOP_LIMIT = 255;
-    int RS_SEND_COUNT = 0;
-    int RS_SEND_INTERVAL_MS = 0;
-    const char * const RS_SEND_INTERVAL_DEFAULT_MS = "500";
+int CommandListener::RtSolCmd::getGateway(int rs_sock_fd,
+                                        int ra_sock_fd,
+                                        char * netIf,
+                                        char *gateway,
+                                        unsigned int *lease) {
+    int RS_SEND_COUNT = 0;          // # of RS to send
+    int RS_SEND_INTERVAL_MS = 0;    // Wait in milliseconds for RS
+    int RA_WAIT_TIMEOUT_SEC = 0;    // Wait in seconds for RA
+    int IF_BRINGUP_WAIT_SEC = 0;    // Period to wait for the interface to be brought up
+    int IF_BRINGUP_WAIT_COUNT = 0;  // # of iterations where we wait for the interface to
+                                    // brought up.
     const char * const RS_SEND_COUNT_DEFAULT = "5";
-    int errorCount = 0;
-
-    // ms to wait in between RS
-    RS_SEND_INTERVAL_MS = getProperty("persist.wifi.v6.rs.retry", RS_SEND_INTERVAL_DEFAULT_MS);
-    LOGD("RS_SEND_INTERVAL_MS = %d", RS_SEND_INTERVAL_MS);
+    const char * const RA_WAIT_TIMEOUT_DEFAULT = "5";
+    const char * const RS_SEND_INTERVAL_DEFAULT_MS = "500";
+    const char * const IF_BRINGUP_WAIT_DEFAULT = "1";
+    const char * const IF_BRINGUP_WAIT_COUNT_DEFAULT = "5";
 
     // Number of solicitations to be sent
     RS_SEND_COUNT = getProperty("persist.wifi.v6.rs.count", RS_SEND_COUNT_DEFAULT);
     LOGD("RS_SEND_COUNT = %d", RS_SEND_COUNT);
+
+    // Wait timeout for RA
+    RA_WAIT_TIMEOUT_SEC = getProperty("persist.wifi.v6.rs.timeout", RA_WAIT_TIMEOUT_DEFAULT);
+    LOGD("RA timeout period = %d s", RA_WAIT_TIMEOUT_SEC);
+
+    // Wait timeout for RS
+    RS_SEND_INTERVAL_MS = getProperty("persist.wifi.v6.rs.retry", RS_SEND_INTERVAL_DEFAULT_MS);
+    LOGD("RS timeout period = %d s", RS_SEND_INTERVAL_MS);
+
+    // Wait timeout for RA
+    IF_BRINGUP_WAIT_SEC = getProperty("persist.wifi.v6.if.timeout", IF_BRINGUP_WAIT_DEFAULT);
+    LOGD("IF bring up wait period is = %d s", IF_BRINGUP_WAIT_SEC);
+
+    IF_BRINGUP_WAIT_COUNT = getProperty("persist.wifi.v6.if.retry", IF_BRINGUP_WAIT_COUNT_DEFAULT);
+    LOGD("IF bring up wait period is = %d s", IF_BRINGUP_WAIT_COUNT);
+
+    struct icmp6_hdr router_solicit;
+    struct sockaddr_in6 dest6;
+    struct timeval to;
+    int rc = 0;
+    int ret = -1;
+    int errorCount = 0;
+    int ifIndex = 0;
+
+    // Make sure the interface is up before proceeding
+    for ( errorCount = 0; errorCount < IF_BRINGUP_WAIT_COUNT; errorCount++) {
+        ifIndex = if_nametoindex(netIf);
+
+        if (!ifIndex) {
+            // Sleep to give the interface time to be brought up
+            LOGE("Interface is not up. Waiting %d seconds", IF_BRINGUP_WAIT_SEC);
+            sleep(IF_BRINGUP_WAIT_SEC);
+        } else {
+            LOGE("Interface is up. Index is %d", ifIndex);
+            break;
+        }
+    }
+
+    if (errorCount == IF_BRINGUP_WAIT_COUNT) {
+        LOGE("TIMEOUT waiting for interface to come up. Bailing!");
+        return -1;
+    }
+
+
+    router_solicit.icmp6_type = ND_ROUTER_SOLICIT;
+    router_solicit.icmp6_code = 0;
+
+    memset(&dest6, 0, sizeof(dest6));
+    inet_pton(AF_INET6, "FF02::2", &dest6.sin6_addr);
+    dest6.sin6_family = AF_INET6;
+    dest6.sin6_scope_id = ifIndex;
+
+    errorCount = 0;
+
+    for (int i = 0; i < RS_SEND_COUNT; i++) {
+        LOGE("sending router solicitation #%d", i+1);
+
+        if (sendto(rs_sock_fd,
+                   &router_solicit,
+                   sizeof(router_solicit),
+                   0,
+                   (struct sockaddr *)&dest6,
+                   sizeof(dest6)) < 0) {
+            LOGE("router solicitation sendto() failed:%s", strerror(errno));
+            errorCount++;
+            // If all send attempts failed, return error
+            if (errorCount == RS_SEND_COUNT) {
+                return -1;
+            } else {
+                /*
+                 * The following sleep / retry fallback is necessary due to
+                 * DAD (Duplicate Address Detection) procedure.
+                 * Once an IPv6 host has configured its addresses, it must perform DAD
+                 * to ensure that its configured addresses are unique on the link.
+                 * Therefore 'usleep()' here accommodates for the DAD procedure.
+                 *
+                 * By setting the following values to '0', DAD is not performed and
+                 * 'usleep()' may not be necessary.
+                 * - sysctl -w net.ipv6.conf.all.accept_dad=0
+                 * - sysctl -w net.ipv6.conf.default.accept_dad=0
+                 * - sysctl -w net.ipv6.conf.wlan0.accept_dad=0
+                 */
+                usleep(RS_SEND_INTERVAL_MS * 1000);
+                continue;
+            }
+        }
+
+        LOGE("Waiting for Router Advertisement #%d", i + 1);
+
+        bool isFound = false;
+        fd_set read_fds;
+
+        while(1) {
+            FD_ZERO(&read_fds);
+            FD_SET(ra_sock_fd, &read_fds);
+            to.tv_sec = RA_WAIT_TIMEOUT_SEC;
+            to.tv_usec = 0;
+
+
+            if ((rc = select(ra_sock_fd + 1, &read_fds, NULL, NULL, &to)) < 0) {
+                LOGE("select failed: %s", strerror(errno));
+                ret = -1;
+                break;
+            } else if (!rc) {
+                LOGE("[TIMEOUT]");
+                ret = -1;
+                break;
+            } else if (FD_ISSET(ra_sock_fd, &read_fds)) {
+                char recvBuf[4096];
+                if ((rc = read(ra_sock_fd, recvBuf, sizeof(recvBuf))) <= 0) {
+                    if (rc == 0) {
+                        LOGE("Lost connection!");
+                    } else {
+                        LOGE("Error reading data (%s)", strerror(errno));
+                    }
+                    ret = -1;
+                    break;
+                } else {
+                    // Look for a router advertisement
+                    int ETH_PKT_OFFSET = 14;
+                    int minPacketSize = sizeof(struct ip6_hdr) +
+                                            sizeof(struct nd_router_advert) + ETH_PKT_OFFSET;
+                    if (rc < minPacketSize) {
+                        continue;
+                    }
+
+                    struct ip6_hdr *ip6hdr = (struct ip6_hdr*)(recvBuf + ETH_PKT_OFFSET);
+                    struct nd_router_advert *ra =
+                                    (struct nd_router_advert*)(recvBuf + ETH_PKT_OFFSET + sizeof(struct ip6_hdr));
+
+                    if (ra->nd_ra_type != ND_ROUTER_ADVERT &&
+                            ra->nd_ra_router_lifetime == 0) {
+                        continue;
+                    }
+
+                    char saddr[INET6_ADDRSTRLEN + 1];
+                    const char *srcAddr = inet_ntop(AF_INET6, &ip6hdr->ip6_src,
+                                                            saddr, INET6_ADDRSTRLEN);
+                    LOGE("Found a gateway:%s", srcAddr);
+
+                    memcpy(gateway, srcAddr, strlen(srcAddr));
+                    gateway[strlen(srcAddr)] = '\0';
+
+                    *lease = ntohs(ra->nd_ra_router_lifetime);
+                    LOGE("lease time:%d", *lease);
+                    isFound = true;
+                    ret = 0;
+                    break;
+                }
+            }
+        }
+
+        if (isFound) {
+            break;
+        }
+    }
+
+    return ret;
+}
+
+/**
+ * Create a socket to send Router solicitations
+ */
+int CommandListener::RtSolCmd::createRsSocket(char * netIf) {
+    int sock_fd = -1;
+    int HOP_LIMIT = 255;
 
     if ((sock_fd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)) < 0) {
       LOGE("router solicitation socket() failed:%s", strerror(errno));
@@ -1812,131 +1995,22 @@ int CommandListener::RtSolCmd::sendRs(char *netIf) {
          return -1;
     }
 
-    router_solicit.icmp6_type = ND_ROUTER_SOLICIT;
-    router_solicit.icmp6_code = 0;
-
-    memset(&dest6, 0, sizeof(dest6));
-    inet_pton(AF_INET6, "FF02::2", &dest6.sin6_addr);
-    dest6.sin6_family = AF_INET6;
-
     if (setsockopt(sock_fd, SOL_SOCKET, SO_BINDTODEVICE, netIf, strlen(netIf)) < 0) {
         LOGE("router solicitation setsockopt():%s", strerror(errno));
         close(sock_fd);
         return -1;
     }
 
-    for (int i=0;i<RS_SEND_COUNT;i++) {
-        LOGE("sending router solicitation #%d", i+1);
-
-        if (sendto(sock_fd,
-                   &router_solicit,
-                   sizeof(router_solicit),
-                   0,
-                   (struct sockaddr *)&dest6,
-                   sizeof(dest6)) < 0) {
-          LOGE("router solicitation sendto() failed:%s", strerror(errno));
-          errorCount++;
-        }
-        usleep(RS_SEND_INTERVAL_MS * 1000);
-    }
-
-    // If all send attempts failed, return error
-    if (errorCount == RS_SEND_COUNT) ret = -1;
-
-    close(sock_fd);
-    return ret;
-}
-
-int CommandListener::RtSolCmd::getGateway(char *netIf,
-                                        char *gateway,
-                                        unsigned int *lease) {
-    int sock_fd;
-    struct icmp6_hdr router_solicit;
-    struct sockaddr_in6 dest6;
-    int error = 0;
-    char recvBuf[4096];
-    int RA_WAIT_TIMEOUT_SEC = 0; // Wait in seconds for RA
-    const char * const RS_WAIT_TIMEOUT_DEFAULT = "5";
-    int ETH_PKT_OFFSET = 14;
-    int ifIndex = if_nametoindex(netIf);
-
-    if ((sock_fd = createRaSocket(ifIndex, netIf)) < 0) {
-      LOGE("create RA socket() failed:%s", strerror(errno));
-      return -1;
-    }
-
-    // Wait timeout for RA
-    RA_WAIT_TIMEOUT_SEC = getProperty("persist.wifi.v6.rs.timeout", RS_WAIT_TIMEOUT_DEFAULT);
-    LOGD("waiting for router advertisement %d s", RA_WAIT_TIMEOUT_SEC);
-
-    struct timeval to;
-    to.tv_sec = RA_WAIT_TIMEOUT_SEC;
-    to.tv_usec = 0;
-    int rc = 0;
-    int ret = 0;
-    fd_set read_fds;
-
-    while(1) {
-        FD_ZERO(&read_fds);
-        FD_SET(sock_fd, &read_fds);
-
-        if ((rc = select(sock_fd + 1, &read_fds, NULL, NULL, &to)) < 0) {
-            ret = -1;
-            break;
-        } else if (!rc) {
-            LOGE("[TIMEOUT]");
-            ret = -1;
-            break;
-        } else if (FD_ISSET(sock_fd, &read_fds)) {
-            if ((rc = read(sock_fd, recvBuf, sizeof(recvBuf))) <= 0) {
-                if (rc == 0) {
-                    LOGE("Lost connection!");
-                } else {
-                    LOGE("Error reading data (%s)", strerror(errno));
-                }
-                ret = -1;
-                break;
-            } else {
-                // Look for a router advertisement
-                int minPacketSize = sizeof(struct ip6_hdr) +
-                                        sizeof(struct nd_router_advert) + ETH_PKT_OFFSET;
-                if (rc < minPacketSize) {
-                    continue;
-                }
-
-                struct ip6_hdr *ip6hdr = (struct ip6_hdr*)(recvBuf + ETH_PKT_OFFSET);
-                struct nd_router_advert *ra =
-                                (struct nd_router_advert*)(recvBuf + ETH_PKT_OFFSET + sizeof(struct ip6_hdr));
-
-                if (ra->nd_ra_type != ND_ROUTER_ADVERT &&
-                        ra->nd_ra_router_lifetime == 0) {
-                    continue;
-                }
-
-                char saddr[INET6_ADDRSTRLEN + 1];
-                const char *srcAddr = inet_ntop(AF_INET6, &ip6hdr->ip6_src,
-                                                        saddr, INET6_ADDRSTRLEN);
-                LOGE("Found a gateway:%s", srcAddr);
-
-                memcpy(gateway, srcAddr, strlen(srcAddr));
-                gateway[strlen(srcAddr)] = '\0';
-
-                *lease = ntohs(ra->nd_ra_router_lifetime);
-                LOGE("lease time:%d", *lease);
-                break;
-            }
-        }
-    }
-    close(sock_fd);
-    return ret;
+    return sock_fd;
 }
 
 /**
  * Create a packet socket to capture ICMPv6
  */
-int CommandListener::RtSolCmd::createRaSocket(int ifIndex, char *netIf) {
+int CommandListener::RtSolCmd::createRaSocket(char *netIf) {
     int sock_fd = -1;
     int ret = -1;
+    int ifIndex = if_nametoindex(netIf);
     struct sockaddr_ll sa;
 
     // icmpv6 filter format auto generated by
