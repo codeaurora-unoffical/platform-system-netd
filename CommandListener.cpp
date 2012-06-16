@@ -951,7 +951,7 @@ int CommandListener::SoftapCmd::runCommand(SocketClient *cli,
 
             len = MAX_CMD_SIZE;
             qsap_hostd_exec_cmd(qccmdbuf, qccmdbuf, (u32*)&len);
-            cli->sendMsg(qccmdbuf);
+            cli->sendMsg(ResponseCode::CommandOkay, qccmdbuf, false);
             return 0;
         }
     }
