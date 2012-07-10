@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2011 Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012 Code Aurora Forum. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -27,30 +27,24 @@
  *
  */
 
+#define LOG_NDEBUG 0
+#define LOG_NDDEBUG 0
+#define LOG_NIDEBUG 0
+
 #include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
 
-#include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 
-#include <linux/netlink.h>
-#include <linux/rtnetlink.h>
-#include <linux/pkt_sched.h>
-
-#define LOG_TAG "RouteController"
 #include <cutils/log.h>
-
-
 #include "RouteController.h"
 
+const char *TAG = "RouteController";
 static char IP_PATH[] = "/system/bin/ip";
-
 const char *RouteController::MAIN_TABLE = "254";
+const int MAXSIZE = 256;
 
-extern "C" int logwrap(int argc, const char **argv, int background);
 
 RouteController::RouteController() {
 }
@@ -58,32 +52,37 @@ RouteController::RouteController() {
 RouteController::~RouteController() {
 }
 
-int RouteController::runIpCmd(const char *cmd) {
-    char buffer[255];
+std::string RouteController::_runIpCmd(const char * cmd) {
+    FILE *fp = NULL;
+    char line[MAXSIZE];
+    std::string res, buffer;
 
-    strncpy(buffer, cmd, sizeof(buffer)-1);
-
-    const char *args[32];
-    char *next = buffer;
-    char *tmp;
-
-    args[0] = IP_PATH;
-    int i = 1;
-
-    while ((tmp = strsep(&next, " "))) {
-        args[i++] = tmp;
-        if (i == 32) {
-            ALOGE("ip argument overflow");
-            errno = E2BIG;
-            return -1;
-        }
+    if (strlen(cmd) > 255) {
+        return std::string(strerror(E2BIG));
     }
-    args[i] = NULL;
 
-    return logwrap(i, args, 0);
+    buffer = IP_PATH;
+    buffer += " ";
+    buffer += cmd;
+    buffer += " 2>&1"; //capture stderr
+
+    ALOGV(TAG,"%s", buffer.c_str());
+
+    if ((fp = popen(buffer.c_str(),"r")) == NULL) {
+        ALOGE(TAG, "failed to popen: %s", strerror(errno));
+        res = (strerror(errno));
+    } else if (fgets(line, sizeof line, fp)) {
+        ALOGV(TAG, "%s", line);
+        res = cmd;
+        res += ": ";
+        res += line;
+    }
+    pclose(fp);
+
+    return res;
 }
 
-int RouteController::repSrcRoute
+std::string RouteController::repSrcRoute
 (
     const char *iface,
     const char *srcPrefix,
@@ -92,28 +91,38 @@ int RouteController::repSrcRoute
     const char *ipver
 )
 {
-    if (repDefRoute(iface, gateway, table, ipver) != 0)
-        return -1;
-    delRule(table, ipver);
-    return addRule(srcPrefix, table, ipver);
+    std::string res = _repDefRoute(iface, gateway, table, ipver);
+    if (res.empty()) {
+        _delRule(table, ipver);
+        res = _addRule(srcPrefix, table, ipver);
+        if (res.empty())
+            res = _flushCache();
+    }
+
+    return res;
 }
 
-int RouteController::delSrcRoute
+std::string RouteController::delSrcRoute
 (
     const char *table,
     const char *ipver
 )
 {
-    if (delDefRoute(table, ipver) != 0)
-        return -1;
-    return delRule(table, ipver);
+    //if iface is down then route is probably purged; ignore the error.
+    _delDefRoute(table, ipver);
+    std::string res = _delRule(table, ipver);
+    if (res.empty())
+        res = _flushCache();
+
+    return res;
 }
 
-int RouteController::addDstRoute
+std::string RouteController::addDstRoute
 (
     const char *iface,
     const char *dstPrefix,
     const char *gateway,
+    const int metric,
     const char *table
 )
 {
@@ -121,56 +130,65 @@ int RouteController::addDstRoute
 
     if (gateway) {
         snprintf(buffer, sizeof buffer,
-                 "route add %s via %s dev %s scope global table %s",
-                 dstPrefix, gateway, iface, table);
+                 "route add %s via %s dev %s table %s metric %d",
+                 dstPrefix, gateway, iface, table, metric);
     } else {
         snprintf(buffer, sizeof buffer,
-                 "route add %s dev %s table %s", dstPrefix, iface, table);
+                 "route add %s dev %s table %s metric %d",
+                 dstPrefix, iface, table, metric);
     }
 
-    // Blindly do this as addition of duplicate route fails; we want
-    // add to succeed if the requested route exists and logwrapper
-    // does not set errno to EEXIST. So delete prior to add
-    delDstRoute(dstPrefix, table);
+    //blindly delete an indentical route if it exists.
+    _delHostRoute(dstPrefix, table);
 
-    int r = runIpCmd(buffer);
+    std::string res  = _runIpCmd(buffer);
+    if (res.empty() || (res.find("exists") != std::string::npos))
+        res = _flushCache();
 
-    if (r == 0)
-        return flushCache();
-    else
-        return -1;
+    return res;
 }
 
-int RouteController::delDstRoute
+std::string RouteController::delDstRoute
+(
+    const char *dstPrefix,
+    const char *table
+)
+{
+    std::string res = _delHostRoute(dstPrefix, table);
+    if (res.empty())
+        res = _flushCache();
+
+    return res;
+}
+
+std::string RouteController::_delHostRoute
 (
     const char *dstPrefix,
     const char *table
 )
 {
     char buffer[255];
-    snprintf(buffer, sizeof buffer, "route del %s table %s", dstPrefix, table);
+    snprintf(buffer, sizeof buffer, "route del %s table %s",
+             dstPrefix, table);
 
-    int r = runIpCmd(buffer);
-
-    if (r == 0)
-        return flushCache();
-    else
-        return -1;
+    return _runIpCmd(buffer);
 }
 
-int RouteController::replaceDefRoute
+std::string RouteController::replaceDefRoute
 (
     const char *iface,
     const char *gateway,
     const char *ipver
 )
 {
-    if(repDefRoute(iface, gateway, MAIN_TABLE, ipver) != 0)
-        return -1;
-    return 0;
+    std::string res = _repDefRoute(iface, gateway, MAIN_TABLE, ipver);
+    if (res.empty())
+        res = _flushCache();
+
+    return res;
 }
 
-int RouteController::repDefRoute
+std::string RouteController::_repDefRoute
 (
     const char *iface,
     const char *gateway,
@@ -186,41 +204,74 @@ int RouteController::repDefRoute
                  ipver, gateway, iface, table);
     } else {
         snprintf(buffer, sizeof buffer,
-                 "%s route replace default dev %s table %s", ipver, iface, table);
+                 "%s route replace default dev %s table %s",
+                 ipver, iface, table);
     }
 
-    int r = runIpCmd(buffer);
-
-    if (r == 0)
-        return flushCache();
-    else
-        return -1;
+    return _runIpCmd(buffer);
 }
 
-int RouteController::delDefRoute
+std::string RouteController::_delDefRoute
 (
     const char *table,
-    const char *ipver
+    const char *ipver,
+    const char *iface
 )
 {
     char buffer[255];
 
-    snprintf(buffer, sizeof buffer,
-             "%s route del default table %s", ipver, table);
+    if (iface) {
+        snprintf(buffer, sizeof buffer,
+                "%s route del default dev %s table %s",
+                ipver, iface, table);
+    } else {
+        snprintf(buffer, sizeof buffer,
+                "%s route del default table %s", ipver, table);
+    }
 
-    int r = runIpCmd(buffer);
-
-    if (r == 0)
-        return flushCache();
-    else
-        return -1;
+    return _runIpCmd(buffer);
 }
 
-int RouteController::flushCache() {
-    return runIpCmd("route flush cached");
+std::string RouteController::addDefRoute
+(
+    const char *iface,
+    const char *gateway,
+    const char *ipver,
+    const int metric,
+    const char *table
+)
+{
+    char buffer[255];
+
+    //remove existing def route for an iface before adding one with new metric
+    _delDefRoute(table, ipver, iface);
+
+    if (gateway) {
+        snprintf(buffer, sizeof buffer,
+                 "%s route add default via %s dev %s table %s metric %d",
+                 ipver, gateway, iface, table, metric);
+    } else {
+        snprintf(buffer, sizeof buffer,
+                 "%s route add default dev %s table %s metric %d",
+                 ipver, iface, table, metric);
+    }
+
+    std::string res = _runIpCmd(buffer);
+    if (res.empty())
+        res = _flushCache();
+
+    return res;
 }
 
-int RouteController::addRule
+std::string RouteController::_flushCache() {
+    char buffer[255];
+
+    snprintf(buffer, sizeof buffer, "route flush cached");
+
+    return _runIpCmd(buffer);
+}
+
+std::string RouteController::_addRule
 (
     const char *address,
     const char *table,
@@ -230,17 +281,12 @@ int RouteController::addRule
     char buffer[255];
 
     snprintf(buffer, sizeof buffer,
-             "%s rule add from %s lookup %s", ipver, address, table);
+            "%s rule add from %s lookup %s", ipver, address, table);
 
-    int r = runIpCmd(buffer);
-
-    if (r == 0)
-        return flushCache();
-    else
-        return -1;
+    return _runIpCmd(buffer);
 }
 
-int RouteController::delRule
+std::string RouteController::_delRule
 (
     const char *table,
     const char *ipver
@@ -251,10 +297,5 @@ int RouteController::delRule
     snprintf(buffer, sizeof buffer,
              "%s rule del table %s", ipver, table);
 
-    int r = runIpCmd(buffer);
-
-    if (r == 0)
-        return flushCache();
-    else
-        return -1;
+    return _runIpCmd(buffer);
 }
