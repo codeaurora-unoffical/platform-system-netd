@@ -58,6 +58,10 @@
 #define INET_ADDRSTRLEN 16
 #endif
 
+#ifdef QCOM_WLAN
+#include "qsap_api.h"
+#endif
+
 TetherController *CommandListener::sTetherCtrl = NULL;
 NatController *CommandListener::sNatCtrl = NULL;
 PppController *CommandListener::sPppCtrl = NULL;
@@ -803,7 +807,101 @@ int CommandListener::SoftapCmd::runCommand(SocketClient *cli,
         return 0;
     } else if (!strcmp(argv[1], "set")) {
         rc = sSoftapCtrl->setSoftap(argc, argv);
-    } else {
+    }
+#ifdef QCOM_WLAN
+    else if (!strcmp(argv[1], "qccmd")) {
+#define MAX_CMD_SIZE 256
+        char qccmdbuf[MAX_CMD_SIZE], *pcmdbuf;
+        int len = MAX_CMD_SIZE, i=2, ret;
+
+        if ( argc < 4 ) {
+            cli->sendMsg(ResponseCode::OperationFailed, "failure: invalid arguments", true);
+            return 0;
+        }
+
+        argc -= 2;
+        pcmdbuf = qccmdbuf;
+#ifdef QCOM_SAP_STA_CONCURRENCY
+        //SAP STA Concurrency Customization
+        // Cmd Format Example "set sap_sta_concurrency=6" where 6 is STA Mode channel
+        if (!strncmp(argv[3], "sap_sta_concurrency=",20) && !strcmp(argv[2], "set")) {
+            //Extract STA Mode channel number from cmd
+            int sta_channel = atoi(&argv[3][20]);
+            int sap_channel;
+            //Get SAP Mode channel from SoftAP SDK
+            ret = snprintf(pcmdbuf, len, " get channel");
+            len = MAX_CMD_SIZE;
+            //Send cmd to SoftAP SDK
+            qsap_hostd_exec_cmd(qccmdbuf, qccmdbuf, (u32*)&len);
+            cli->sendMsg(qccmdbuf);
+
+            sap_channel = atoi(&qccmdbuf[16]);
+            ALOGD("SAP STA Concurrency GET CHANNEL Rsp %s STA Channel %d SAP Channel %d",qccmdbuf,sta_channel,sap_channel);
+
+            //StopSoftAP and exitAP if channels are different
+            if(sta_channel != sap_channel) {
+                rc = sSoftapCtrl->stopSoftap();
+                if (!rc) {
+                    cli->sendMsg(ResponseCode::CommandOkay, "Softap operation succeeded", false);
+                } else {
+                    cli->sendMsg(ResponseCode::OperationFailed, "Softap operation failed", true);
+                }
+                //Send exitAP cmd to SoftAP SDK
+                len = MAX_CMD_SIZE;
+                ret = snprintf(pcmdbuf, len, " set reset_ap=5");
+                qsap_hostd_exec_cmd(qccmdbuf, qccmdbuf, (u32*)&len);
+                cli->sendMsg(qccmdbuf);
+                ALOGD("SAP STA Concurrency result for exitAP %s",qccmdbuf);
+            }
+
+            return 0;
+        }
+        // Cmd Format Example "set sta_assoc_complete_ind"
+        else if (!strcmp(argv[3], "sta_assoc_complete_ind") && !strcmp(argv[2], "set")) {
+            //StartSoftAP and initAP if SoftAP is down
+            if(!sSoftapCtrl->isSoftapStarted()) {
+                //Send initAP cmd to SoftAP SDK
+                len = MAX_CMD_SIZE;
+                ret = snprintf(pcmdbuf, len, " set reset_ap=4");
+                //Send cmd to SoftAP SDK
+                qsap_hostd_exec_cmd(qccmdbuf, qccmdbuf, (u32*)&len);
+                cli->sendMsg(qccmdbuf);
+                ALOGD("SAP STA Concurrency result for initAP %s",qccmdbuf);
+
+                rc = sSoftapCtrl->startSoftap();
+                if (!rc) {
+                    cli->sendMsg(ResponseCode::CommandOkay, "Softap operation succeeded", false);
+                } else {
+                   cli->sendMsg(ResponseCode::OperationFailed, "Softap operation failed", true);
+                }
+            }
+            return 0;
+        } //SAP STA Concurrency Customization Ends
+        else
+#endif //QCOM_SAP_STA_CONCURRENCY
+        {
+
+            while(argc--) {
+                ret = snprintf(pcmdbuf, len, " %s", argv[i]);
+                if ( ret == len ) {
+                    /* Error case */
+                    /* TODO: Command too long send the error message */
+                    *pcmdbuf = '\0';
+                    break;
+                }
+                pcmdbuf += ret;
+                len -= ret;
+                i++;
+            }
+
+            len = MAX_CMD_SIZE;
+            qsap_hostd_exec_cmd(qccmdbuf, qccmdbuf, (u32*)&len);
+            cli->sendMsg(ResponseCode::CommandOkay, qccmdbuf, false);
+            return 0;
+        }
+    }
+#endif
+    else {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Softap Unknown cmd", false);
         return 0;
     }
