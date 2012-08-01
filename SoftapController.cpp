@@ -190,7 +190,7 @@ int SoftapController::startSoftap() {
 
 #ifdef QCOM_WLAN
     property_get("wlan.driver.ath", ath6kl_supported, 0);
-    if (*ath6kl_supported != '1')
+    if (*ath6kl_supported != '1' && *ath6kl_supported != '2')
     {
        qsap_set_ini_filename();
     }
@@ -298,7 +298,7 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
     iface = argv[2];
 #ifdef QCOM_WLAN
     property_get("wlan.driver.ath", ath6kl_supported, 0);
-    if (*ath6kl_supported != '1')
+    if (*ath6kl_supported != '1' && *ath6kl_supported != '2')
     {
         return qsapsetSoftap(argc, argv);
     }
