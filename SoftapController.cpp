@@ -204,10 +204,17 @@ int SoftapController::startSoftap() {
     if (!pid) {
 #ifdef HAVE_HOSTAPD
         ensure_entropy_file_exists();
-        if (execl("/system/bin/hostapd", "/system/bin/hostapd",
-                  "-e", WIFI_ENTROPY_FILE,
-                  HOSTAPD_CONF_FILE, (char *) NULL)) {
-            ALOGE("execl failed (%s)", strerror(errno));
+        property_get("wlan.driver.ath", ath6kl_supported, 0);
+        if (*ath6kl_supported == '1')
+        {
+            if (execl("/system/bin/wpa_supplicant", "/system/bin/wpa_supplicant",
+                      "-e", WIFI_ENTROPY_FILE, "-iwlan0", "-Dnl80211",
+                      "-c", HOSTAPD_CONF_FILE, "-ddd", (char *) NULL)) {
+                           ALOGE("execl failed (%s)", strerror(errno));
+            }
+        } else if (execl("/system/bin/hostapd", "/system/bin/hostapd",
+                         "-e", WIFI_ENTROPY_FILE, HOSTAPD_CONF_FILE, (char *) NULL)) {
+                           ALOGE("execl failed (%s)", strerror(errno));
         }
 #endif
         ALOGE("Should never get here!");
@@ -316,8 +323,21 @@ int SoftapController::setSoftap(int argc, char *argv[]) {
     }
 
     property_get("wlan.driver.ath", ath6kl_supported, 0);
-    if (*ath6kl_supported != '1')
+    if (*ath6kl_supported == '1')
     {
+        asprintf(&wbuf, "ap_scan=2\nnetwork={\nmode=2\nssid=\"%s\"\nfrequency=2412\n", ssid);
+        if (argc > 5) {
+             if (!strcmp(argv[5], "wpa-psk")) {
+                 asprintf(&fbuf, "%skey_mgmt=WPA-PSK\npsk=\"%s\"\npairwise=TKIP\n}\n", wbuf, argv[6]);
+             } else if (!strcmp(argv[5], "wpa2-psk")) {
+                 asprintf(&fbuf, "%skey_mgmt=WPA-PSK\npsk=\"%s\"\npairwise=CCMP\n}\n", wbuf, argv[6]);
+             } else if (!strcmp(argv[5], "open")) {
+                 asprintf(&fbuf, "%skey_mgmt=NONE\n}\n", wbuf);
+             }
+        } else {
+            asprintf(&fbuf, "%skey_mgmt=NONE\n}\n", wbuf);
+	}
+    } else {
         channel_num = (argc > 7) ? atoi(argv[7]) : WIFI_DEFAULT_CHANNEL;
 
         if (channel_num > 14) {
