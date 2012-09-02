@@ -72,6 +72,7 @@ IdletimerController * CommandListener::sIdletimerCtrl = NULL;
 ResolverController *CommandListener::sResolverCtrl = NULL;
 SecondaryTableController *CommandListener::sSecondaryTableCtrl = NULL;
 RouteController *CommandListener::sRouteCtrl = NULL;
+CommandListener::RtSolCmd::GwWorkerThreadPool *CommandListener::sGwThreadPool = NULL;
 
 CommandListener::CommandListener() :
                  FrameworkListener("netd", true) {
@@ -1688,12 +1689,61 @@ CommandListener::RtSolCmd::RtSolCmd() :
                  NetdCommand("rtsol") {
 }
 
+CommandListener::RtSolCmd::GwWorkerThreadPool::GwWorkerThreadPool() {
+    pthread_mutex_init(&mRefMutex, NULL);
+    mRefCount = 0;
+}
+
+CommandListener::RtSolCmd::GwWorkerThreadPool::~GwWorkerThreadPool() {
+    pthread_mutex_destroy(&mRefMutex);
+}
+
+void CommandListener::RtSolCmd::GwWorkerThreadPool::incrementRefCount() {
+    pthread_mutex_lock(&mRefMutex);
+    mRefCount++;
+    pthread_mutex_unlock(&mRefMutex);
+
+}
+
+void CommandListener::RtSolCmd::GwWorkerThreadPool::decrementRefCount() {
+    pthread_mutex_lock(&mRefMutex);
+    if (mRefCount > 0) {
+        mRefCount--;
+    }
+    pthread_mutex_unlock(&mRefMutex);
+
+}
+
+bool CommandListener::RtSolCmd::GwWorkerThreadPool::isPoolFull() {
+    bool ret = false;
+    pthread_mutex_lock(&mRefMutex);
+    if (mRefCount >= this->MAX_V6_GATEWAY_WORKER_THREADS) {
+        ret = true;
+    }
+    pthread_mutex_unlock(&mRefMutex);
+    return ret;
+}
+
+int CommandListener::RtSolCmd::GwWorkerThreadPool::getRefCount() {
+    int count = 0;
+    pthread_mutex_lock(&mRefMutex);
+    count = mRefCount;
+    pthread_mutex_unlock(&mRefMutex);
+    return count;
+}
+
 /*
  * Usage for this API is "rtsol <iface_name>"
  * return value is "<gateway_addr> <lease_time>"
  */
 int CommandListener::RtSolCmd::runCommand(SocketClient *cli,
                                           int argc, char **argv) {
+    if (!sGwThreadPool) {
+        sGwThreadPool = new GwWorkerThreadPool();
+    }
+
+    RtSolCmd::V6GatewayHandler *v6GatewayHandler = NULL;
+
     if (argc < 2) {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
         return -1;
@@ -1704,44 +1754,109 @@ int CommandListener::RtSolCmd::runCommand(SocketClient *cli,
                      "Usage: rtsol <interface name>", false);
         return -1;
     }
+    if (sGwThreadPool->isPoolFull()) {
+        cli->sendMsg(ResponseCode::CommandSyntaxError, "Max Clients Reached", false);
+        return -1;
+    }
 
-    char * netIf = argv[1];
+    v6GatewayHandler = new RtSolCmd::V6GatewayHandler(cli, argv[1]);
+    if (v6GatewayHandler) {
+        v6GatewayHandler->start();
+    }
+    return 0;
+}
+
+CommandListener::RtSolCmd::V6GatewayHandler::V6GatewayHandler(SocketClient *c, char *netIf) {
+    mClient = c;
+    mCmdNum = mClient->getCmdNum();
+    mNetIf = strdup(netIf);
+    if (sGwThreadPool) {
+        sGwThreadPool->incrementRefCount();
+    }
+}
+
+CommandListener::RtSolCmd::V6GatewayHandler::~V6GatewayHandler() {
+    if (sGwThreadPool)
+        sGwThreadPool->decrementRefCount();
+    if(mNetIf) {
+        free(mNetIf);
+        mNetIf = NULL;
+    }
+}
+
+
+void CommandListener::RtSolCmd::V6GatewayHandler::start() {
+    int threadStarted = 0;
+    do {
+        if (!sGwThreadPool) {
+            ALOGD("V6GatewayHandler - sGwThreadPool is null");
+            threadStarted = -1;
+            break;
+        }
+        threadStarted |= pthread_create(
+                              &(sGwThreadPool->mThreadPool[sGwThreadPool->getRefCount()]), NULL,
+                              CommandListener::RtSolCmd::V6GatewayHandler::threadStart, this);
+    } while (false);
+    if (0 != threadStarted) {
+        mClient->sendMsg(ResponseCode::OperationFailed,"V6Gateway thread failed to start " ,
+                true);
+    }
+}
+
+void* CommandListener::RtSolCmd::V6GatewayHandler::threadStart(void *obj) {
+    V6GatewayHandler* handler = reinterpret_cast<V6GatewayHandler*>(obj);
+    handler->run();
+    delete handler;
+    pthread_exit(NULL);
+    return NULL;
+}
+
+void CommandListener::RtSolCmd::V6GatewayHandler::run() {
     int ra_sock_fd = -1;
     int rs_sock_fd = -1;
     int ret = -1;
 
+
     do {
         /* Create socket for sending Router Soicitation */
-        if ((rs_sock_fd = createRsSocket(netIf)) < 0) {
+        if ((rs_sock_fd = createRsSocket(mNetIf)) < 0) {
             ALOGE("create RS socket() failed:%s", strerror(errno));
-            ret -1;
             break;
         }
         /* Create and bind socket for receiving Router Advertisement */
-        if ((ra_sock_fd = createRaSocket(netIf)) < 0) {
+        if ((ra_sock_fd = createRaSocket(mNetIf)) < 0) {
             ALOGE("create RA socket() failed:%s", strerror(errno));
-            ret = -1;
             break;
         }
 
         char gateway[INET6_ADDRSTRLEN + 1];
         char *tmp = NULL;
         unsigned int lease = 0;
-        ret = getGateway(rs_sock_fd, ra_sock_fd, netIf, gateway, &lease);
+        ret = getGateway(rs_sock_fd, ra_sock_fd, mNetIf, gateway, &lease);
+
+        /* Before sending the response back, set the original command number
+         * that initiated this request. This ensures that NDC clears / removes the request
+         * from its response queue after matching the responses' command number.
+         */
+        mClient->setCmdNum(mCmdNum);
+        ALOGD("rtsol wlan0 - cmdNum response : %d", mClient->getCmdNum());
 
         if (ret) {
-           ALOGE("error retrieving ipv6 gateway:%s", strerror(errno));
-            cli->sendMsg(ResponseCode::OperationFailed, strerror(errno), false);
-            return -1;
+            break;
         }
 
         ALOGD("Gateway found:%s", gateway);
 
         asprintf(&tmp, "%s %d", gateway, lease);
-        cli->sendMsg(ResponseCode::CommandOkay, tmp, false);
+        mClient->sendMsg(ResponseCode::CommandOkay, tmp, false);
         free(tmp);
-        ret = 0;
-    } while(0);
+    } while (0);
+
+    if (ret == -1) {
+        ALOGE("V6GatewayHandler error:%s", strerror(errno));
+        mClient->sendMsg(ResponseCode::OperationFailed, strerror(errno),
+                false);
+    }
 
     if (ra_sock_fd != -1) {
         close(ra_sock_fd);
@@ -1749,7 +1864,7 @@ int CommandListener::RtSolCmd::runCommand(SocketClient *cli,
     if (rs_sock_fd != -1) {
         close(rs_sock_fd);
     }
-    return ret;
+
 }
 
 /*
@@ -1759,7 +1874,7 @@ int CommandListener::RtSolCmd::runCommand(SocketClient *cli,
  * If an invalid value is retrieved, the default
  * value will be returned, if present, else it will return 0.
  */
-int CommandListener::RtSolCmd::getProperty(const char * const propertyKey,
+int CommandListener::RtSolCmd::V6GatewayHandler::getProperty(const char * const propertyKey,
                                                 const char * const defaultValue) {
     char property[PROPERTY_VALUE_MAX];
     int retProperty = 0;
@@ -1778,7 +1893,7 @@ int CommandListener::RtSolCmd::getProperty(const char * const propertyKey,
     return retProperty;
 }
 
-int CommandListener::RtSolCmd::getGateway(int rs_sock_fd,
+int CommandListener::RtSolCmd::V6GatewayHandler::getGateway(int rs_sock_fd,
                                         int ra_sock_fd,
                                         char * netIf,
                                         char *gateway,
@@ -1961,7 +2076,7 @@ int CommandListener::RtSolCmd::getGateway(int rs_sock_fd,
 /**
  * Create a socket to send Router solicitations
  */
-int CommandListener::RtSolCmd::createRsSocket(char * netIf) {
+int CommandListener::RtSolCmd::V6GatewayHandler::createRsSocket(char * netIf) {
     int sock_fd = -1;
     int HOP_LIMIT = 255;
 
@@ -1995,7 +2110,7 @@ int CommandListener::RtSolCmd::createRsSocket(char * netIf) {
 /**
  * Create a packet socket to capture ICMPv6
  */
-int CommandListener::RtSolCmd::createRaSocket(char *netIf) {
+int CommandListener::RtSolCmd::V6GatewayHandler::createRaSocket(char *netIf) {
     int sock_fd = -1;
     int ret = -1;
     int ifIndex = if_nametoindex(netIf);
