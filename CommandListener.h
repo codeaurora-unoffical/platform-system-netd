@@ -18,6 +18,7 @@
 #ifndef _COMMANDLISTENER_H__
 #define _COMMANDLISTENER_H__
 
+#include <pthread.h>
 #include <sysutils/FrameworkListener.h>
 
 #include "NetdCommand.h"
@@ -154,15 +155,44 @@ private:
         RtSolCmd();
         virtual ~RtSolCmd() {}
         int runCommand(SocketClient *c, int argc, char ** argv);
-    private:
-        int getGateway(int rs_sock_fd, int ra_sock_fd, char * netIf,
-                           char *gateway,
-                           unsigned int *lease);
-        int createRaSocket(char *netIf);
-        int createRsSocket(char *netIf);
-        int getProperty(const char * const propertyKey,
-                            const char * const defaultValue);
+
+    class GwWorkerThreadPool {
+        private:
+            pthread_mutex_t mRefMutex;
+            int mRefCount;
+        public:
+            static const int MAX_V6_GATEWAY_WORKER_THREADS  = 5;
+            GwWorkerThreadPool();
+            virtual ~GwWorkerThreadPool();
+            void incrementRefCount();
+            void decrementRefCount();
+            bool isPoolFull();
+            int getRefCount();
+            pthread_t mThreadPool[MAX_V6_GATEWAY_WORKER_THREADS];
+
     };
+
+    class V6GatewayHandler {
+        public:
+            V6GatewayHandler(SocketClient *c, char *netIf);
+            int getGateway(int rs_sock_fd, int ra_sock_fd, char * netIf,
+                    char *gateway, unsigned int *lease);
+            void start();
+            static void *threadStart(void *pV6GatewayHandler);
+            ~V6GatewayHandler();
+        private:
+            void run();
+            int createRaSocket(char *netIf);
+            int createRsSocket(char *netIf);
+            int getProperty(const char * const propertyKey,
+                                    const char * const defaultValue);
+            SocketClient* mClient;
+            char* mNetIf;
+            int mCmdNum;
+        };
+    };
+
+    static RtSolCmd::GwWorkerThreadPool *sGwThreadPool;
 };
 
 #endif
