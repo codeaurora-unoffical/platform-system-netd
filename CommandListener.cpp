@@ -1834,12 +1834,7 @@ void CommandListener::RtSolCmd::V6GatewayHandler::run() {
         unsigned int lease = 0;
         ret = getGateway(rs_sock_fd, ra_sock_fd, mNetIf, gateway, &lease);
 
-        /* Before sending the response back, set the original command number
-         * that initiated this request. This ensures that NDC clears / removes the request
-         * from its response queue after matching the responses' command number.
-         */
-        mClient->setCmdNum(mCmdNum);
-        ALOGD("rtsol wlan0 - cmdNum response : %d", mClient->getCmdNum());
+        ALOGD("rtsol wlan0 - cmdNum response : %d", mCmdNum);
 
         if (ret) {
             break;
@@ -1848,14 +1843,18 @@ void CommandListener::RtSolCmd::V6GatewayHandler::run() {
         ALOGD("Gateway found:%s", gateway);
 
         asprintf(&tmp, "%s %d", gateway, lease);
-        mClient->sendMsg(ResponseCode::CommandOkay, tmp, false);
+        /* Before sending the response back, set the original command number
+         * that initiated this request. This ensures that NDC clears / removes the request
+         * from its response queue after matching the responses' command number.
+         */
+        mClient->sendMsgWithCmdNum(ResponseCode::CommandOkay, tmp, mCmdNum);
         free(tmp);
     } while (0);
 
     if (ret == -1) {
         ALOGE("V6GatewayHandler error:%s", strerror(errno));
-        mClient->sendMsg(ResponseCode::OperationFailed, strerror(errno),
-                false);
+        mClient->sendMsgWithCmdNum(ResponseCode::OperationFailed, strerror(errno),
+                                   mCmdNum);
     }
 
     if (ra_sock_fd != -1) {
