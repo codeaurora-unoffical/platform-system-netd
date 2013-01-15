@@ -41,6 +41,13 @@ LOCAL_SHARED_LIBRARIES := libstlport libsysutils liblog libcutils libnetutils \
                           libcrypto libhardware_legacy libmdnssd libdl \
                           liblogwrap
 
+ifeq ($(BOARD_HAS_QCOM_WLAN), true)
+  LOCAL_SRC_FILES += QualcommSoftapCmd.cpp
+  LOCAL_CFLAGS += -DQCOM_WLAN
+  LOCAL_SHARED_LIBRARIES += libqsap_sdk
+  LOCAL_C_INCLUDES += $(LOCAL_PATH)/../qcom/softap/sdk/
+endif
+
 include $(BUILD_EXECUTABLE)
 
 include $(CLEAR_VARS)
