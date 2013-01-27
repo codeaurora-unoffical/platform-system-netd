@@ -1,6 +1,9 @@
 /*
  * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
+ * Not a Contribution. Apache license notifications and license are
+ * retained for attribution purposes only.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -30,6 +33,7 @@
 #include "ResolverController.h"
 #include "SecondaryTableController.h"
 #include "FirewallController.h"
+#include "RouteController.h"
 
 class CommandListener : public FrameworkListener {
     static TetherController *sTetherCtrl;
@@ -42,6 +46,7 @@ class CommandListener : public FrameworkListener {
     static ResolverController *sResolverCtrl;
     static SecondaryTableController *sSecondaryTableCtrl;
     static FirewallController *sFirewallCtrl;
+    static RouteController *sRouteCtrl;
 
 public:
     CommandListener();
@@ -152,6 +157,13 @@ private:
     protected:
         int sendGenericOkFail(SocketClient *cli, int cond);
         static FirewallRule parseRule(const char* arg);
+    };
+
+    class RouteCmd : public NetdCommand {
+    public:
+        RouteCmd();
+        virtual ~RouteCmd() {}
+        int runCommand(SocketClient *c, int argc, char ** argv);
     };
 };
 
