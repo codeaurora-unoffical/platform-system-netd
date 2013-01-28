@@ -24,7 +24,7 @@ LOCAL_SRC_FILES:=                                      \
                   oem_iptables_hook.cpp                \
                   logwrapper.c                         \
                   main.cpp                             \
-
+                  RouteController.cpp
 
 LOCAL_MODULE:= netd
 
