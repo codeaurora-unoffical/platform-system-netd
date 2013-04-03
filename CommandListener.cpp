@@ -567,6 +567,41 @@ int CommandListener::InterfaceCmd::runCommand(SocketClient *cli,
                 return 0;
             }
 
+            /* Configure ipv6 parameters for wlan0 interface */
+            char response_string[150] = {0};
+            int failed_ipv6=0;
+            if(!strncmp(argv[2],"wlan0",6) && !strncmp(argv[3],"enable",7)) {
+                char *tmp_ipv6route;
+                strcpy(response_string," ");
+                asprintf(&tmp_ipv6route, "/proc/sys/net/ipv6/conf/%s/accept_ra_defrtr", argv[2]);
+                if (writeFile(tmp_ipv6route, !strncmp(argv[3], "enable", 7) ? "1" : "0", 1) < 0) {
+                    failed_ipv6++;
+                    strcpy(response_string, "IPv6 route ");
+                }
+                free(tmp_ipv6route);
+                asprintf(&tmp_ipv6route, "/proc/sys/net/ipv6/conf/%s/router_solicitation_delay",
+                             argv[2]);
+                if (writeFile(tmp_ipv6route, "5", 1) < 0) {
+                    failed_ipv6++;
+                    strncat(response_string, "IPv6 RS Delay ", sizeof(response_string));
+                }
+                free(tmp_ipv6route);
+                asprintf(&tmp_ipv6route, "/proc/sys/net/ipv6/conf/%s/router_solicitation_interval",
+                             argv[2]);
+                if (writeFile(tmp_ipv6route, "1", 1) < 0) {
+                    failed_ipv6++;
+                    strncat(response_string, "IPv6 RS Sol Interval ", sizeof(response_string));
+                }
+                free(tmp_ipv6route);
+                asprintf(&tmp_ipv6route, "/proc/sys/net/ipv6/conf/%s/router_solicitations",
+                             argv[2]);
+                if (writeFile(tmp_ipv6route, "5", 1) < 0) {
+                    failed_ipv6++;
+                    strncat(response_string, "IPv6 # of RS ", sizeof(response_string));
+                }
+                free(tmp_ipv6route);
+            }
+        
             char *tmp;
             asprintf(&tmp, "/proc/sys/net/ipv6/conf/%s/disable_ipv6", argv[2]);
 
@@ -578,6 +613,15 @@ int CommandListener::InterfaceCmd::runCommand(SocketClient *cli,
             }
 
             free(tmp);
+            if(failed_ipv6 > 0) {
+                char *fail_msg;
+                asprintf(&fail_msg, "Failed to change IPv6 state - %d counts failed on %s",
+                        failed_ipv6, response_string);
+                cli->sendMsg(ResponseCode::OperationFailed, fail_msg, true);
+                free(fail_msg);
+                return 0;
+            }
+
             cli->sendMsg(ResponseCode::CommandOkay, "IPv6 state changed", false);
             return 0;
         } else {
