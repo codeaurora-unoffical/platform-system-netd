@@ -2,8 +2,7 @@
  * Copyright (C) 2008 The Android Open Source Project
  * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
- * Not a Contribution. Apache license notifications and license are
- * retained for attribution purposes only.
+ * Not a Contribution.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,6 +46,10 @@
 #include "NetdConstants.h"
 #include "FirewallController.h"
 
+#ifdef ENABLE_QRDEXT_CT_PPPOE_SUPPORT
+#include "PppoeController.h"
+#endif
+
 #ifndef INET_ADDRSTRLEN
 #define INET_ADDRSTRLEN 16
 #endif
@@ -58,6 +61,9 @@
 TetherController *CommandListener::sTetherCtrl = NULL;
 NatController *CommandListener::sNatCtrl = NULL;
 PppController *CommandListener::sPppCtrl = NULL;
+#ifdef ENABLE_QRDEXT_CT_PPPOE_SUPPORT
+PppoeController *CommandListener::sPppoeCtrl = NULL;
+#endif
 SoftapController *CommandListener::sSoftapCtrl = NULL;
 BandwidthController * CommandListener::sBandwidthCtrl = NULL;
 IdletimerController * CommandListener::sIdletimerCtrl = NULL;
@@ -149,6 +155,9 @@ CommandListener::CommandListener() :
 #else /* QCOM_WLAN */
     registerCmd(new SoftapCmd());
 #endif /* QCOM_WLAN */
+#ifdef ENABLE_QRDEXT_CT_PPPOE_SUPPORT
+    registerCmd(new PppoeCmd());
+#endif
     registerCmd(new BandwidthControlCmd());
     registerCmd(new IdletimerControlCmd());
     registerCmd(new ResolverCmd());
@@ -163,6 +172,10 @@ CommandListener::CommandListener() :
         sNatCtrl = new NatController(sSecondaryTableCtrl);
     if (!sPppCtrl)
         sPppCtrl = new PppController();
+#ifdef ENABLE_QRDEXT_CT_PPPOE_SUPPORT
+    if (!sPppoeCtrl)
+        sPppoeCtrl = new PppoeController();
+#endif
     if (!sSoftapCtrl)
         sSoftapCtrl = new SoftapController();
     if (!sBandwidthCtrl)
@@ -959,6 +972,66 @@ int CommandListener::PppdCmd::runCommand(SocketClient *cli,
 
     return 0;
 }
+
+#ifdef ENABLE_QRDEXT_CT_PPPOE_SUPPORT
+CommandListener::PppoeCmd::PppoeCmd() :
+                 NetdCommand("pppoe") {
+}
+
+int CommandListener::PppoeCmd::runCommand(SocketClient *cli,
+                                                      int argc, char **argv) {
+    int rc = 0;
+
+    if (!strcmp(argv[1], "startpppoe")) {
+
+        PppoeController::PppoeConfig config;
+        config.user = argv[2];
+        config.pass = argv[3];
+        config.interf = argv[4];
+        config.lcp_echo_interval = atoi(argv[5]);
+        config.lcp_echo_failure = atoi(argv[6]);
+        config.mtu = atoi(argv[7]);
+        config.mru = atoi(argv[8]);
+        config.timeout = atoi(argv[9]);
+        config.MSS = atoi(argv[10]);
+
+        rc = sPppoeCtrl->startPppoe(&config);
+
+        char msg[255];
+        if (!rc) {
+            sprintf(msg, "startpppoe operation succeeded");
+        } else {
+            sprintf(msg, "startpppoe operation failed %d", errno);
+        }
+        cli->sendMsg(ResponseCode::CommandOkay, msg, false);
+    } else if (!strcmp(argv[1], "stoppppoe")) {
+        rc = sPppoeCtrl->stopPppoe();
+        if (!rc) {
+            cli->sendMsg(ResponseCode::CommandOkay, "stoppppoe operation succeeded", false);
+        } else {
+            cli->sendMsg(ResponseCode::OperationFailed, "stoppppoe operation failed", true);
+        }
+    } else if(!strcmp(argv[1], "route") && !strcmp(argv[2], "setdefault")){
+        char* iface;
+        if(argc < 4) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
+            return 0;
+        }
+        iface = argv[3];
+        rc = sPppoeCtrl->setRoute(iface);
+        if (!rc) {
+            cli->sendMsg(ResponseCode::CommandOkay, "set default route succeeded", false);
+        } else {
+            cli->sendMsg(ResponseCode::OperationFailed, "set default route failed", true);
+        }
+    } else {
+        cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown pppoe cmd", false);
+        return 0;
+    }
+
+    return 0;
+}
+#endif
 
 CommandListener::SoftapCmd::SoftapCmd() :
                  NetdCommand("softap") {
