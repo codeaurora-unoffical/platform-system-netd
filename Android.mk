@@ -16,6 +16,7 @@ LOCAL_SRC_FILES:=                                      \
                   NetlinkHandler.cpp                   \
                   NetlinkManager.cpp                   \
                   PppController.cpp                    \
+                  PppoeController.cpp                  \
                   ResolverController.cpp               \
                   SecondaryTableController.cpp         \
                   SoftapController.cpp                 \
@@ -35,6 +36,8 @@ LOCAL_C_INCLUDES := $(KERNEL_HEADERS) \
                     bionic \
                     bionic/libc/private \
                     $(call include-path-for, libhardware_legacy)/hardware_legacy
+
+LOCAL_C_INCLUDES += build/buildplus/target/
 
 LOCAL_CFLAGS := -Werror=format
 
