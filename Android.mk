@@ -17,6 +17,7 @@ LOCAL_SRC_FILES:=                                      \
                   NetlinkHandler.cpp                   \
                   NetlinkManager.cpp                   \
                   PppController.cpp                    \
+                  PppoeController.cpp                  \
                   ResolverController.cpp               \
                   SecondaryTableController.cpp         \
                   SoftapController.cpp                 \
