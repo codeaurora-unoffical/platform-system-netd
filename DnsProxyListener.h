@@ -40,9 +40,11 @@ private:
         GetAddrInfoHandler(SocketClient *c,
                            char* host,
                            char* service,
-                           struct addrinfo* hints,
-                           char* iface,
-                           pid_t pid);
+                           struct addrinfo* hints)
+            : mClient(c),
+              mHost(host),
+              mService(service),
+              mHints(hints) {}
         ~GetAddrInfoHandler();
 
         static void* threadStart(void* handler);
@@ -54,35 +56,6 @@ private:
         char* mHost;    // owned
         char* mService; // owned
         struct addrinfo* mHints;  // owned
-        char* mIface; // owned
-        pid_t mPid;
-    };
-
-    /* ------ gethostbyname ------*/
-    class GetHostByNameCmd : public NetdCommand {
-    public:
-        GetHostByNameCmd();
-        virtual ~GetHostByNameCmd() {}
-        int runCommand(SocketClient *c, int argc, char** argv);
-    };
-
-    class GetHostByNameHandler {
-    public:
-        GetHostByNameHandler(SocketClient *c,
-                            pid_t pid,
-                            char *iface,
-                            char *name,
-                            int af);
-        ~GetHostByNameHandler();
-        static void* threadStart(void* handler);
-        void start();
-    private:
-        void run();
-        SocketClient* mClient; //ref counted
-        pid_t mPid;
-        char* mIface; // owned
-        char* mName; // owned
-        int mAf;
     };
 
     /* ------ gethostbyaddr ------*/
@@ -98,9 +71,11 @@ private:
         GetHostByAddrHandler(SocketClient *c,
                             void* address,
                             int   addressLen,
-                            int   addressFamily,
-                            char* iface,
-                            pid_t pid);
+                            int   addressFamily)
+            : mClient(c),
+              mAddress(address),
+              mAddressLen(addressLen),
+              mAddressFamily(addressFamily) {}
         ~GetHostByAddrHandler();
 
         static void* threadStart(void* handler);
@@ -112,8 +87,6 @@ private:
         void* mAddress;    // address to lookup; owned
         int   mAddressLen; // length of address to look up
         int   mAddressFamily;  // address family
-        char* mIface; // owned
-        pid_t mPid;
     };
 };
 
