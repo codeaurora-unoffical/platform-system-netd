@@ -694,12 +694,12 @@ int BandwidthController::runIptablesAlertCmd(IptOp op, const char *alertName, in
 
     ifaceLimiting = "! -i lo+";
     asprintf(&alertQuotaCmd, ALERT_IPT_TEMPLATE, ifaceLimiting, opFlag, "INPUT",
-        bytes, alertName, alertName);
+        bytes, alertName);
     res |= runIpxtablesCmd(alertQuotaCmd, IptRejectNoAdd);
     free(alertQuotaCmd);
     ifaceLimiting = "! -o lo+";
     asprintf(&alertQuotaCmd, ALERT_IPT_TEMPLATE, ifaceLimiting, opFlag, "OUTPUT",
-        bytes, alertName, alertName);
+        bytes, alertName);
     res |= runIpxtablesCmd(alertQuotaCmd, IptRejectNoAdd);
     free(alertQuotaCmd);
     return res;
@@ -726,7 +726,7 @@ int BandwidthController::runIptablesAlertFwdCmd(IptOp op, const char *alertName,
 
     ifaceLimiting = "! -i lo+";
     asprintf(&alertQuotaCmd, ALERT_IPT_TEMPLATE, ifaceLimiting, opFlag, "FORWARD",
-        bytes, alertName, alertName);
+        bytes, alertName);
     res = runIpxtablesCmd(alertQuotaCmd, IptRejectNoAdd);
     free(alertQuotaCmd);
     return res;
@@ -882,8 +882,8 @@ int BandwidthController::setCostlyAlert(const char *costName, int64_t bytes, int
         res = updateQuota(alertName, *alertBytes);
     } else {
         asprintf(&chainNameAndPos, "costly_%s %d", costName, ALERT_RULE_POS_IN_COSTLY_CHAIN);
-        asprintf(&alertQuotaCmd, ALERT_IPT_TEMPLATE, "-I", chainNameAndPos, bytes, alertName,
-                 alertName);
+        asprintf(&alertQuotaCmd, ALERT_IPT_TEMPLATE, "", "-I", chainNameAndPos, bytes, alertName);
+        memmove(alertQuotaCmd, alertQuotaCmd + 1, strlen(alertQuotaCmd));
         res |= runIpxtablesCmd(alertQuotaCmd, IptRejectNoAdd);
         free(alertQuotaCmd);
         free(chainNameAndPos);
@@ -906,7 +906,8 @@ int BandwidthController::removeCostlyAlert(const char *costName, int64_t *alertB
     }
 
     asprintf(&chainName, "costly_%s", costName);
-    asprintf(&alertQuotaCmd, ALERT_IPT_TEMPLATE, "-D", chainName, *alertBytes, alertName, alertName);
+    asprintf(&alertQuotaCmd, ALERT_IPT_TEMPLATE, "", "-D", chainName, *alertBytes, alertName);
+    memmove(alertQuotaCmd, alertQuotaCmd + 1, strlen(alertQuotaCmd));
     res |= runIpxtablesCmd(alertQuotaCmd, IptRejectNoAdd);
     free(alertQuotaCmd);
     free(chainName);
