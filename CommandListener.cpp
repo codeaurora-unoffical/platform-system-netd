@@ -2,8 +2,7 @@
  * Copyright (C) 2008 The Android Open Source Project
  * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
- * Not a Contribution. Apache license notifications and license are
- * retained for attribution purposes only.
+ * Not a Contribution.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,6 +44,8 @@
 #include "NetdConstants.h"
 #include "FirewallController.h"
 
+#include "PppoeController.h"
+
 #ifndef INET_ADDRSTRLEN
 #define INET_ADDRSTRLEN 16
 #endif
@@ -56,6 +57,7 @@
 TetherController *CommandListener::sTetherCtrl = NULL;
 NatController *CommandListener::sNatCtrl = NULL;
 PppController *CommandListener::sPppCtrl = NULL;
+PppoeController *CommandListener::sPppoeCtrl = NULL;
 SoftapController *CommandListener::sSoftapCtrl = NULL;
 BandwidthController * CommandListener::sBandwidthCtrl = NULL;
 IdletimerController * CommandListener::sIdletimerCtrl = NULL;
@@ -148,6 +150,7 @@ CommandListener::CommandListener() :
 #else /* QCOM_WLAN */
     registerCmd(new SoftapCmd());
 #endif /* QCOM_WLAN */
+    registerCmd(new PppoeCmd());
     registerCmd(new BandwidthControlCmd());
     registerCmd(new IdletimerControlCmd());
     registerCmd(new ResolverCmd());
@@ -163,6 +166,8 @@ CommandListener::CommandListener() :
         sNatCtrl = new NatController(sSecondaryTableCtrl);
     if (!sPppCtrl)
         sPppCtrl = new PppController();
+    if (!sPppoeCtrl)
+        sPppoeCtrl = PppoeController::Instance();
     if (!sSoftapCtrl)
         sSoftapCtrl = new SoftapController();
     if (!sBandwidthCtrl)
@@ -816,6 +821,64 @@ int CommandListener::PppdCmd::runCommand(SocketClient *cli,
         cli->sendMsg(ResponseCode::CommandOkay, "Pppd operation succeeded", false);
     } else {
         cli->sendMsg(ResponseCode::OperationFailed, "Pppd operation failed", true);
+    }
+
+    return 0;
+}
+
+CommandListener::PppoeCmd::PppoeCmd() :
+                 NetdCommand("pppoe") {
+}
+
+int CommandListener::PppoeCmd::runCommand(SocketClient *cli,
+                                                      int argc, char **argv) {
+    int rc = 0;
+
+    if (!strcmp(argv[1], "start")) {
+
+        PppoeController::PppoeConfig config;
+        config.user = argv[2];
+        config.pass = argv[3];
+        config.interf = argv[4];
+        config.lcp_echo_interval = atoi(argv[5]);
+        config.lcp_echo_failure = atoi(argv[6]);
+        config.mtu = atoi(argv[7]);
+        config.mru = atoi(argv[8]);
+        config.timeout = atoi(argv[9]);
+        config.MSS = atoi(argv[10]);
+
+        rc = sPppoeCtrl->startPppoe(&config);
+
+        char msg[255];
+        if (!rc) {
+            sprintf(msg, "start pppoe operation succeeded");
+        } else {
+            sprintf(msg, "start pppoe operation failed %d", errno);
+        }
+        cli->sendMsg(ResponseCode::CommandOkay, msg, false);
+    } else if (!strcmp(argv[1], "stop")) {
+        rc = sPppoeCtrl->stopPppoe();
+        if (!rc) {
+            cli->sendMsg(ResponseCode::CommandOkay, "stop pppoe operation succeeded", false);
+        } else {
+            cli->sendMsg(ResponseCode::OperationFailed, "stop pppoe operation failed", true);
+        }
+    } else if(!strcmp(argv[1], "route") && !strcmp(argv[2], "setdefault")){
+        char* iface;
+        if(argc < 4) {
+            cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
+            return 0;
+        }
+        iface = argv[3];
+        rc = sPppoeCtrl->setRoute(iface);
+        if (!rc) {
+            cli->sendMsg(ResponseCode::CommandOkay, "set default route succeeded", false);
+        } else {
+            cli->sendMsg(ResponseCode::OperationFailed, "set default route failed", true);
+        }
+    } else {
+        cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown pppoe cmd", false);
+        return 0;
     }
 
     return 0;
