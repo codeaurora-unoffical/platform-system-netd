@@ -42,6 +42,7 @@ private:
     PppoeController();
     static void sigchld_interrupt(int);
     static void notifyPppoeExited();
+    int kill_pppoe(void);
 
 public:
     class PppoeConfig {
