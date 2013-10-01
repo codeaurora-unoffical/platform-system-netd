@@ -52,6 +52,7 @@
 
 #define PPPD_PATH "/system/bin/pppd"
 #define LOG_TAG "PppoeController"
+#define PPPOE_PID "/data/pppoe.pid"
 
 static const int pppoeExit = 666;
 pid_t            PppoeController::mPid;
@@ -96,8 +97,6 @@ void PppoeController::sigchld_interrupt(int signal) {
         }
         mPid = 0;
         notifyPppoeExited();
-    } else {
-        mPid = 0;
     }
 }
 
@@ -134,8 +133,8 @@ int PppoeController::startPppoe(PppoeConfig* config) {
         sprintf(mruString, "%d", config->mru);
         sprintf(lcp_echo_interval_String, "%d", config->lcp_echo_interval);
         sprintf(lcp_echo_failure_String, "%d", config->lcp_echo_failure);
-        sprintf(ptyString, "/system/bin/pppoe -p /etc/ppp/pid.pppoe -I %s -T %d -U -m %d",
-                config->interf, config->timeout, config->MSS);
+        sprintf(ptyString, "/system/xbin/pppoe -p %s -I %s -T %d -U -m %d",
+                PPPOE_PID, config->interf, config->timeout, config->MSS);
         argv[i++] = PPPD_PATH;
         argv[i++] = "pty";
         argv[i++] = ptyString;
@@ -177,6 +176,28 @@ int PppoeController::startPppoe(PppoeConfig* config) {
     return 0;
 }
 
+int PppoeController::kill_pppoe(void) {
+    FILE *f;
+    int pid = 0; /* pid number from pid file */
+
+    if((f = fopen(PPPOE_PID, "r")) == 0) {
+        fprintf(stderr, "Can't open pid file");
+        return -1;
+    }
+
+    if(fscanf(f, "%d", &pid)!= 1) {
+    }
+    /* send signal SIGKILL to kill */
+    if(pid > 0){
+        kill(pid, SIGKILL);
+    }
+
+    fclose(f);
+    // delete the pid file when killed
+    remove(PPPOE_PID);
+    return 0;
+}
+
 int PppoeController::stopPppoe() {
 
     if (mPid == 0) {
@@ -185,6 +206,8 @@ int PppoeController::stopPppoe() {
     }
 
     ALOGD("Stopping PPPOE services");
+    // kill pppoe first
+    kill_pppoe();
     kill(mPid, SIGKILL);
     waitpid(mPid, NULL, 0);
     mPid = 0;
