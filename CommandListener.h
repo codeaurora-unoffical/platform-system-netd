@@ -17,6 +17,7 @@
  * limitations under the License.
  */
 
+
 #ifndef _COMMANDLISTENER_H__
 #define _COMMANDLISTENER_H__
 
@@ -82,6 +83,13 @@ private:
     public:
         TetherCmd();
         virtual ~TetherCmd() {}
+        int runCommand(SocketClient *c, int argc, char ** argv);
+    };
+
+    class V6RtrAdvCmd: public NetdCommand {
+    public:
+        V6RtrAdvCmd();
+        virtual ~V6RtrAdvCmd() {}
         int runCommand(SocketClient *c, int argc, char ** argv);
     };
 

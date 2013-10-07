@@ -53,6 +53,7 @@ public:
     static const int InterfaceGetMtuResult     = 224;
     static const int GetMarkResult             = 225;
     static const int RouteConfigurationResult  = 226;
+    static const int V6RtrAdvResult            = 227;
 
     // 400 series - The command was accepted but the requested action
     // did not take place.
