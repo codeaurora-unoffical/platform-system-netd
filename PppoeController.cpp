@@ -215,17 +215,21 @@ int PppoeController::stopPppoe() {
     return 0;
 }
 
-int PppoeController::setRoute(char* iface) {
+int PppoeController::setRoute(char* iface, char* gateway) {
 
     if (mPid == 0) {
         ALOGE("PPPOE already stopped");
         return 0;
     }
     char set_route[254];
-    sprintf(set_route, "ip route add default dev %s", iface);
+    if(gateway != NULL) {
+        sprintf(set_route, "ip route add default via %s dev %s", gateway, iface);
+    } else {
+        sprintf(set_route, "ip route add default dev %s", iface);
+    }
     ALOGD("delete default route");
     system("ip route del default");
-    ALOGD("add default route %s", iface);
+    ALOGD("add default route %s via %s", iface, gateway);
     system(set_route);
 
     return 0;

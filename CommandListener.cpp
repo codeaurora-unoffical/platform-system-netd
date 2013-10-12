@@ -865,12 +865,16 @@ int CommandListener::PppoeCmd::runCommand(SocketClient *cli,
         }
     } else if(!strcmp(argv[1], "route") && !strcmp(argv[2], "setdefault")){
         char* iface;
+        char* gateway = NULL;
         if(argc < 4) {
             cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
             return 0;
         }
         iface = argv[3];
-        rc = sPppoeCtrl->setRoute(iface);
+        if(argc == 5) {
+            gateway = argv[4];
+        }
+        rc = sPppoeCtrl->setRoute(iface, gateway);
         if (!rc) {
             cli->sendMsg(ResponseCode::CommandOkay, "set default route succeeded", false);
         } else {
