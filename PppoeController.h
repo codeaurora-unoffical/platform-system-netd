@@ -64,7 +64,7 @@ public:
 
     int startPppoe(PppoeConfig* config);
     int stopPppoe();
-    int setRoute(char* iface);
+    int setRoute(char* iface, char* gateway);
 };
 
 #endif
