@@ -119,9 +119,9 @@ int CommandListener::QualcommSoftapCmd::runCommand(SocketClient *cli,
 #endif //QCOM_SAP_STA_CONCURRENCY
         {
 
-            while(argc--) {
+            while (argc--) {
                 ret = snprintf(pcmdbuf, len, " %s", argv[i]);
-                if ( ret == len ) {
+                if ((ret < 0) || (ret >= len)) {
                     /* Error case */
                     /* TODO: Command too long send the error message */
                     *pcmdbuf = '\0';
