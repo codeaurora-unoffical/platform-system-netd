@@ -42,6 +42,7 @@ private:
     PppoeController();
     static void sigchld_interrupt(int);
     static void notifyPppoeExited();
+    int kill_pppoe(void);
 
 public:
     class PppoeConfig {
@@ -63,7 +64,7 @@ public:
 
     int startPppoe(PppoeConfig* config);
     int stopPppoe();
-    int setRoute(char* iface);
+    int setRoute(char* iface, char* gateway);
 };
 
 #endif
