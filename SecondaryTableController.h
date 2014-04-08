@@ -27,6 +27,10 @@
 #define IFNAMSIZ 16
 #endif
 
+#ifndef IPARGSIZ
+#define IPARGSIZ 20
+#endif
+
 static const int INTERFACES_TRACKED = 10;
 static const int BASE_TABLE_NUMBER = 60;
 static int MAX_TABLE_NUMBER = BASE_TABLE_NUMBER + INTERFACES_TRACKED;
