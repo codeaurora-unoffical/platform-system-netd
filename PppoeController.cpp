@@ -86,15 +86,16 @@ void PppoeController::notifyPppoeExited() {
     mNm->getBroadcaster()->sendBroadcast(pppoeExit, msg, false);
 }
 
-void PppoeController::sigchld_interrupt(int signal) {
+void PppoeController::sigchld_interrupt(int sig) {
     int status = 0;
-    if (signal == SIGCHLD && (waitpid(mPid, &status, WNOHANG)>0)) {
+    if ((mPid != 0) && (waitpid(mPid, &status, WNOHANG)>0)) {
         if (WIFEXITED(status)) {
             status = WEXITSTATUS(status);
             ALOGD("pppd exited (status = %d)", status);
         }else {
             ALOGD("pppd was killed (pid = %d)", mPid);
         }
+        (void)signal(SIGCHLD,SIG_DFL);
         mPid = 0;
         notifyPppoeExited();
     }
@@ -209,8 +210,6 @@ int PppoeController::stopPppoe() {
     // kill pppoe first
     kill_pppoe();
     kill(mPid, SIGKILL);
-    waitpid(mPid, NULL, 0);
-    mPid = 0;
     ALOGD("PPPOE services stopped");
     return 0;
 }
