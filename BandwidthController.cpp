@@ -605,6 +605,8 @@ int BandwidthController::setInterfaceSharedQuota(const char *iface, int64_t maxB
         ALOGE("Invalid bytes value. 1..max_int64.");
         return -1;
     }
+    if (!isIfaceName(iface))
+        return -1;
     if (StrncpyAndCheck(ifn, iface, sizeof(ifn))) {
         ALOGE("Interface name longer than %d", MAX_IFACENAME_LEN);
         return -1;
@@ -665,6 +667,8 @@ int BandwidthController::removeInterfaceSharedQuota(const char *iface) {
     std::list<std::string>::iterator it;
     const char *costName = "shared";
 
+    if (!isIfaceName(iface))
+        return -1;
     if (StrncpyAndCheck(ifn, iface, sizeof(ifn))) {
         ALOGE("Interface name longer than %d", MAX_IFACENAME_LEN);
         return -1;
@@ -703,6 +707,9 @@ int BandwidthController::setInterfaceQuota(const char *iface, int64_t maxBytes) 
     const char *costName;
     std::list<QuotaInfo>::iterator it;
     std::string quotaCmd;
+
+    if (!isIfaceName(iface))
+        return -1;
 
     if (!maxBytes) {
         /* Don't talk about -1, deprecate it. */
@@ -773,6 +780,9 @@ int BandwidthController::getInterfaceQuota(const char *costName, int64_t *bytes)
     char *fname;
     int scanRes;
 
+    if (!isIfaceName(costName))
+        return -1;
+
     asprintf(&fname, "/proc/net/xt_quota/%s", costName);
     fp = fopen(fname, "r");
     free(fname);
@@ -794,6 +804,8 @@ int BandwidthController::removeInterfaceQuota(const char *iface) {
     const char *costName;
     std::list<QuotaInfo>::iterator it;
 
+    if (!isIfaceName(iface))
+        return -1;
     if (StrncpyAndCheck(ifn, iface, sizeof(ifn))) {
         ALOGE("Interface name longer than %d", MAX_IFACENAME_LEN);
         return -1;
@@ -822,6 +834,11 @@ int BandwidthController::removeInterfaceQuota(const char *iface) {
 int BandwidthController::updateQuota(const char *quotaName, int64_t bytes) {
     FILE *fp;
     char *fname;
+
+    if (!isIfaceName(quotaName)) {
+        ALOGE("updateQuota: Invalid quotaName \"%s\"", quotaName);
+        return -1;
+    }
 
     asprintf(&fname, "/proc/net/xt_quota/%s", quotaName);
     fp = fopen(fname, "w");
@@ -997,6 +1014,11 @@ int BandwidthController::removeSharedAlert(void) {
 int BandwidthController::setInterfaceAlert(const char *iface, int64_t bytes) {
     std::list<QuotaInfo>::iterator it;
 
+    if (!isIfaceName(iface)) {
+        ALOGE("setInterfaceAlert: Invalid iface \"%s\"", iface);
+        return -1;
+    }
+
     if (!bytes) {
         ALOGE("Invalid bytes value. 1..max_int64.");
         return -1;
@@ -1017,6 +1039,11 @@ int BandwidthController::setInterfaceAlert(const char *iface, int64_t bytes) {
 int BandwidthController::removeInterfaceAlert(const char *iface) {
     std::list<QuotaInfo>::iterator it;
 
+    if (!isIfaceName(iface)) {
+        ALOGE("removeInterfaceAlert: Invalid iface \"%s\"", iface);
+        return -1;
+    }
+
     for (it = quotaIfaces.begin(); it != quotaIfaces.end(); it++) {
         if (it->ifaceName == iface)
             break;
@@ -1035,6 +1062,11 @@ int BandwidthController::setCostlyAlert(const char *costName, int64_t bytes, int
     char *chainName;
     int res = 0;
     char *alertName;
+
+    if (!isIfaceName(costName)) {
+        ALOGE("setCostlyAlert: Invalid costName \"%s\"", costName);
+        return -1;
+    }
 
     if (!bytes) {
         ALOGE("Invalid bytes value. 1..max_int64.");
@@ -1060,6 +1092,11 @@ int BandwidthController::removeCostlyAlert(const char *costName, int64_t *alertB
     char *chainName;
     char *alertName;
     int res = 0;
+
+    if (!isIfaceName(costName)) {
+        ALOGE("removeCostlyAlert: Invalid costName \"%s\"", costName);
+        return -1;
+    }
 
     asprintf(&alertName, "%sAlert", costName);
     if (!*alertBytes) {

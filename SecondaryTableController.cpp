@@ -317,6 +317,10 @@ int SecondaryTableController::setFwmarkRule(const char *iface, bool add) {
     int mark = tableIndex + BASE_TABLE_NUMBER;
     char mark_str[11];
     int ret;
+    if (!isIfaceName(iface)) {
+        errno = ENOENT;
+        return -1;
+    }
 
     //fail fast if any rules already exist for this interface
     if (mUidMarkMap->anyRulesForMark(mark)) {
@@ -576,6 +580,11 @@ int SecondaryTableController::setFwmarkRoute(const char* iface, const char *dest
         return -1;
     }
     int mark = tableIndex + BASE_TABLE_NUMBER;
+    if (!isIfaceName(iface)) {
+        errno = ENOENT;
+        return -1;
+    }
+
     char mark_str[11] = {0};
     char dest_str[44]; // enough to store an IPv6 address + 3 character bitmask
 

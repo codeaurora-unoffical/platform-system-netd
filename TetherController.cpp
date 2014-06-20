@@ -36,6 +36,7 @@
 #include <cutils/properties.h>
 #include <logwrap/logwrap.h>
 
+#include "NetdConstants.h"
 #include "TetherController.h"
 #include "SecondaryTableController.h"
 
@@ -495,6 +496,10 @@ int TetherController::applyDnsInterfaces() {
 
 int TetherController::tetherInterface(const char *interface) {
     ALOGD("tetherInterface(%s)", interface);
+    if (!isIfaceName(interface)) {
+        errno = ENOENT;
+        return -1;
+    }
     mInterfaces->push_back(strdup(interface));
 
     addV6RtrAdvIface(interface);
