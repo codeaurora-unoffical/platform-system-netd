@@ -24,6 +24,7 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <dirent.h>
 
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -39,16 +40,84 @@
 #include <private/android_filesystem_config.h>
 #include "wifi.h"
 #include "ResponseCode.h"
-
+#include "wpa_ctrl.h"
 #include "SoftapController.h"
 
 static const char HOSTAPD_CONF_FILE[]    = "/data/misc/wifi/hostapd.conf";
 static const char HOSTAPD_BIN_FILE[]    = "/system/bin/hostapd";
+static const char HOSTAPD_UNIX_FILE[]    = "/data/misc/wifi/hostapd/wlan0";
+static const char HOSTAPD_SOCKETS_DIR[]    = "/data/misc/wifi/sockets";
+static const char HOSTAPD_DHCP_DIR[]    = "/data/misc/dhcp";
 
-SoftapController::SoftapController()
-    : mPid(0) {}
+SoftapController::SoftapController(SocketListener *sl)
+    : mPid(0) {
+    mSpsl = sl;
+}
 
 SoftapController::~SoftapController() {
+}
+
+void *SoftapController::threadStart(void *obj){
+    SoftapController *me = reinterpret_cast<SoftapController *>(obj);
+    struct wpa_ctrl *ctrl;
+    int count = 0;
+
+    DIR *dir=NULL;
+
+    dir = opendir(HOSTAPD_SOCKETS_DIR);
+    if(NULL == dir){
+        mkdir(HOSTAPD_SOCKETS_DIR, S_IRWXU|S_IRWXG|S_IRWXO);
+        chown(HOSTAPD_SOCKETS_DIR, AID_WIFI, AID_WIFI);
+    }else{
+        closedir(dir);
+    }
+
+    chmod(HOSTAPD_DHCP_DIR, S_IRWXU|S_IRWXG|S_IRWXO);
+
+    ctrl = wpa_ctrl_open(HOSTAPD_UNIX_FILE);
+    while ( ctrl == NULL ){
+        if (count >= 10 )
+            break;
+        ctrl = wpa_ctrl_open(HOSTAPD_UNIX_FILE);
+        sleep(1);
+        count++;
+    }
+    if (count == 10){
+        ALOGE("Connection to hostapd Error.");
+        return NULL;
+    }
+
+    if (wpa_ctrl_attach(ctrl) !=0 ){
+        wpa_ctrl_close(ctrl);
+        ALOGE("Attach to hostapd Error.");
+        return NULL;
+    }
+
+    while(me->mHostapdFlag) {
+        int res = 0;
+        char buf[256];
+        char dest_str[300];
+        while (wpa_ctrl_pending(ctrl)) {
+            size_t len = sizeof(buf) - 1;
+            res = wpa_ctrl_recv(ctrl, buf, &len);
+            if (res == 0) {
+                buf[len] = '\0';
+                ALOGD("Get event from hostapd (%s)", buf);
+                memset(dest_str, 0x0, sizeof(dest_str));
+                snprintf(dest_str, sizeof(dest_str), "IfaceClass active %s", buf);
+                me->mSpsl->sendBroadcast(ResponseCode::InterfaceClassActivity, dest_str, false);
+            }else
+                break;
+        }
+        if(res < 0)
+	    break;
+        sleep(2);
+    }
+
+    wpa_ctrl_detach(ctrl);
+    wpa_ctrl_close(ctrl);
+
+    return NULL;
 }
 
 int SoftapController::startSoftap() {
@@ -77,6 +146,10 @@ int SoftapController::startSoftap() {
         mPid = pid;
         ALOGD("SoftAP started successfully");
         usleep(AP_BSS_START_DELAY);
+        mHostapdFlag = 1;
+        if((mThreadErr = pthread_create(&mThread,NULL,SoftapController::threadStart,this)) != 0){
+            ALOGE("pthread_create failed for hostapd listen socket (%s)", strerror(errno));
+	}
     }
     return ResponseCode::SoftapStatusResult;
 }
@@ -86,6 +159,11 @@ int SoftapController::stopSoftap() {
     if (mPid == 0) {
         ALOGE("SoftAP is not running");
         return ResponseCode::SoftapStatusResult;
+    }
+
+    mHostapdFlag = 0;
+    if(mThreadErr == 0){
+        pthread_join(mThread, NULL);
     }
 
     ALOGD("Stopping the SoftAP service...");
