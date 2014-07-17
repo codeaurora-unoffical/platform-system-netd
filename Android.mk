@@ -33,6 +33,7 @@ LOCAL_C_INCLUDES := $(KERNEL_HEADERS) \
                     external/mdnsresponder/mDNSShared \
                     external/openssl/include \
                     external/stlport/stlport \
+                    external/wpa_supplicant_8/src/common \
                     bionic \
                     bionic/libc/private \
                     $(call include-path-for, libhardware_legacy)/hardware_legacy
@@ -41,7 +42,7 @@ LOCAL_CFLAGS := -Werror=format
 
 LOCAL_SHARED_LIBRARIES := libstlport libsysutils liblog libcutils libnetutils \
                           libcrypto libhardware_legacy libmdnssd libdl \
-                          liblogwrap
+                          liblogwrap libwpa_client
 
 ifeq ($(BOARD_HAS_QCOM_WLAN), true)
   LOCAL_SRC_FILES += QsoftapCmd.cpp
