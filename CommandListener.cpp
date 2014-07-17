@@ -219,7 +219,7 @@ CommandListener::CommandListener(UidMarkMap *map) :
     if (!sPppoeCtrl)
         sPppoeCtrl = PppoeController::Instance();
     if (!sSoftapCtrl)
-        sSoftapCtrl = new SoftapController();
+        sSoftapCtrl = new SoftapController(this);
     if (!sBandwidthCtrl)
         sBandwidthCtrl = new BandwidthController();
     if (!sIdletimerCtrl)
