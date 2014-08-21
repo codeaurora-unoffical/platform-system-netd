@@ -187,6 +187,11 @@ int TetherController::startTethering(int num_addrs, struct in_addr* addrs) {
 
         int num_processed_args = TETHER_START_CONST_ARG + (num_addrs/2) + 1; // 1 null for termination
         char **args = (char **)malloc(sizeof(char *) * num_processed_args);
+        if (!args) {
+          ALOGE("failed to allocate memory");
+          close(pipefd[0]);
+          return -1;
+        }
         args[num_processed_args - 1] = NULL;
         args[0] = (char *)"/system/bin/dnsmasq";
         args[1] = (char *)"--keep-in-foreground";

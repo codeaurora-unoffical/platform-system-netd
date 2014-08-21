@@ -822,6 +822,10 @@ int CommandListener::TetherCmd::runCommand(SocketClient *cli,
             int arg_index = 2;
             int array_index = 0;
             in_addr *addrs = (in_addr *)malloc(sizeof(in_addr) * num_addrs);
+            if (!addrs) {
+              cli->sendMsg(ResponseCode::CommandMemoryError, "Failed to allocate memory", false);
+              return 0;
+            }
             while (array_index < num_addrs) {
                 if (!inet_aton(argv[arg_index++], &(addrs[array_index++]))) {
                     cli->sendMsg(ResponseCode::CommandParameterError, "Invalid address", false);
