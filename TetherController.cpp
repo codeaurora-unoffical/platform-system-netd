@@ -262,6 +262,10 @@ int TetherController::startV6RtrAdv(int num_ifaces, char **ifaces) {
         const char *cmd = RTRADVDAEMON;
 
         args = (char **)calloc(num_ifaces * 3 + 2, sizeof(char *));
+        if (!args) {
+          ALOGE("%s: failed to allocate memory", __func__);
+          return -1;
+        }
 
         args[0] = strdup(RTRADVDAEMON);
         for (int i=0; i < num_ifaces; i++) {
