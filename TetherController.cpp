@@ -46,7 +46,7 @@
 #define IP6_CFG_ALL_FORWARDING      "/proc/sys/net/ipv6/conf/all/forwarding"
 #define IP6_IFACE_CFG_ACCEPT_RA     "/proc/sys/net/ipv6/conf/%s/accept_ra"
 #define PROC_PATH_SIZE              255
-
+#define RTRADVDAEMON_MIN_IFACES     2
 
 TetherController::TetherController() {
     mInterfaces = new InterfaceCollection();
@@ -247,6 +247,12 @@ int TetherController::startV6RtrAdv(int num_ifaces, char **ifaces) {
     int pid;
     int num_processed_args = 1;
     gid_t groups [] = { AID_NET_ADMIN, AID_NET_RAW, AID_INET };
+
+    if (num_ifaces < RTRADVDAEMON_MIN_IFACES) {
+        ALOGD("Need atleast %d interfaces to start Router advertisement daemon",
+              RTRADVDAEMON_MIN_IFACES);
+        return 0;
+    }
 
     if ((pid = fork()) < 0) {
         ALOGE("%s: fork failed (%s)", __func__, strerror(errno));
