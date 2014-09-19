@@ -387,22 +387,22 @@ int SecondaryTableController::setFwmarkRule(const char *iface, bool add) {
     // The command might fail during delete if the iface is gone
     if (add && ret) return ret;
 
-    const char *fwmark6_cmd[] = {
-        IP_PATH,
-        "-6",
-        "rule",
-        add ? "add" : "del",
-        "prio",
-        RULE_PRIO,
-        "fwmark",
-        mark_str,
-        "table",
-        mark_str
-    };
-    ret = runCmd(ARRAY_SIZE(fwmark6_cmd), fwmark6_cmd);
-
-
-    if (ret) return ret;
+    if (add) {
+        const char *fwmark6_cmd[] = {
+            IP_PATH,
+            "-6",
+            "rule",
+            "add",
+            "prio",
+            RULE_PRIO,
+            "fwmark",
+            mark_str,
+            "table",
+            mark_str
+        };
+        ret = runCmd(ARRAY_SIZE(fwmark6_cmd), fwmark6_cmd);
+        if (ret) return ret;
+    }
 
     //create the route rule chain
     char chain_str[IFNAMSIZ + 18];
