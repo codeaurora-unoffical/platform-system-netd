@@ -75,14 +75,21 @@ void *SoftapController::threadStart(void *obj){
     chmod(HOSTAPD_DHCP_DIR, S_IRWXU|S_IRWXG|S_IRWXO);
 
     ctrl = wpa_ctrl_open(HOSTAPD_UNIX_FILE);
-    while ( ctrl == NULL ){
-        if (count >= 10 )
-            break;
+    while (ctrl == NULL){
+        /*
+         * thread is used to receive sta connected msg from hostapd
+         * through wap_ctrl interface,when thread is starting up,
+         * it's possible that hostpd has sta connected to it ,so
+         * decrease sleep time to 10ms to lower the ratio that
+         * miss the msg from hostapd
+         */
+        usleep(20000);
         ctrl = wpa_ctrl_open(HOSTAPD_UNIX_FILE);
-        sleep(1);
+        if (ctrl != NULL || count >= 150)
+            break;
         count++;
     }
-    if (count == 10){
+    if (count == 150 && ctrl == NULL){
         ALOGE("Connection to hostapd Error.");
         return NULL;
     }
