@@ -52,8 +52,12 @@ TetherController::TetherController() {
     mInterfaces = new InterfaceCollection();
     mUpstreamInterfaces = new InterfaceCollection();
     mDnsForwarders = new NetAddressCollection();
-    mDaemonFd = -1;
-    mDaemonPid = 0;
+    mInterfacecnt = 0;
+    for (int i = 0; i < MAX_INTERFACES; i++) {
+        mInterfacelist[i].iface = NULL;
+        mInterfacelist[i].daemonFd = -1;
+        mInterfacelist[i].daemonPid = 0;
+    }
 }
 
 TetherController::~TetherController() {
@@ -70,6 +74,11 @@ TetherController::~TetherController() {
     mUpstreamInterfaces->clear();
 
     mDnsForwarders->clear();
+
+    for (int i = 0; i < MAX_INTERFACES; i++) {
+        if (mInterfacelist[i].iface)
+            free(mInterfacelist[i].iface);
+    }
 }
 
 static int config_write_setting(const char *path, const char *value)
@@ -146,19 +155,26 @@ bool TetherController::getIpFwdEnabled() {
     return (enabled  == '1' ? true : false);
 }
 
-#define TETHER_START_CONST_ARG        8
-int TetherController::startTethering(int num_addrs, struct in_addr* addrs) {
-    if (mDaemonPid != 0) {
-        ALOGE("Tethering already started");
-        errno = EBUSY;
-        return -1;
-    }
-
-    ALOGD("Starting tethering services");
-
+#define TETHER_START_CONST_ARG        10
+int TetherController::startTethering(int num_addrs, struct in_addr* addrs,
+                       char *iface)
+{
+    int index = 0;
+    bool isfound = false;
     pid_t pid;
     int pipefd[2];
 
+    if (!iface) {
+        ALOGE("%s Error iface name is null", __func__);
+        return -1;
+    }
+
+    if (mInterfacecnt >= MAX_INTERFACES) {
+        ALOGE("%s : Error maximum Interface created", __func__);
+        return -1;
+    }
+
+    ALOGD("%s : starting tethering services Iface = %s", __func__, iface);
     if (pipe(pipefd) < 0) {
         ALOGE("pipe failed (%s)", strerror(errno));
         return -1;
@@ -187,16 +203,23 @@ int TetherController::startTethering(int num_addrs, struct in_addr* addrs) {
 
         int num_processed_args = TETHER_START_CONST_ARG + (num_addrs/2) + 1; // 1 null for termination
         char **args = (char **)malloc(sizeof(char *) * num_processed_args);
+        if (args == NULL) {
+             ALOGE("%s : Error malloc failed", __func__);
+             close(pipefd[0]);
+             return -1;
+        }
         args[num_processed_args - 1] = NULL;
-        args[0] = (char *)"/system/bin/dnsmasq";
-        args[1] = (char *)"--keep-in-foreground";
-        args[2] = (char *)"--no-resolv";
-        args[3] = (char *)"--no-poll";
-        args[4] = (char *)"--dhcp-authoritative";
+        args[index++] = (char *)"/system/bin/dnsmasq";
+        args[index++] = (char *)"--interface";
+        args[index++] = (char *) iface;
+        args[index++] = (char *)"--except-interface=lo";
+        args[index++] = (char *)"--bind-interfaces";
+        args[index++] = (char *)"--keep-in-foreground";
+        args[index++] = (char *)"--no-resolv";
+        args[index++] = (char *)"--no-poll";
         // TODO: pipe through metered status from ConnService
-        args[5] = (char *)"--dhcp-option-force=43,ANDROID_METERED";
-        args[6] = (char *)"--pid-file";
-        args[7] = (char *)"";
+        args[index++] = (char *)"--pid-file";
+        args[index++] = (char *)"";
 
         int nextArg = TETHER_START_CONST_ARG;
         for (int addrIndex=0; addrIndex < num_addrs;) {
@@ -204,43 +227,76 @@ int TetherController::startTethering(int num_addrs, struct in_addr* addrs) {
             char *end = strdup(inet_ntoa(addrs[addrIndex++]));
             asprintf(&(args[nextArg++]),"--dhcp-range=%s,%s,1h", start, end);
         }
-
         if (execv(args[0], args)) {
             ALOGE("execl failed (%s)", strerror(errno));
         }
-        ALOGE("Should never get here!");
+        ALOGE("%s : Error should never get here", __func__);
         _exit(-1);
     } else {
         close(pipefd[0]);
-        mDaemonPid = pid;
-        mDaemonFd = pipefd[1];
-        applyDnsInterfaces();
-        ALOGD("Tethering services running");
+        for (int i = 0; i < MAX_INTERFACES; i++) {
+            if (!mInterfacelist[i].iface) {
+                mInterfacelist[i].iface = strdup(iface);
+                mInterfacelist[i].daemonPid = pid;
+                mInterfacelist[i].daemonFd = pipefd[1];
+                mInterfacecnt++;
+                isfound = true;
+            }
+            if (isfound)
+                break;
+        }
+        applyDnsInterfaces((const char*)iface);
+        if (!isfound)
+            ALOGE("%s : Error should never get here!", __func__);
+        else
+            ALOGD("%s : Tethering services running", __func__);
     }
 
     return 0;
 }
 
-int TetherController::stopTethering() {
+int TetherController::stopTethering(char *iface)
+{
+    bool isfound = false;
+    pid_t   daemonPid = 0;
+    int     daemonFd = -1;
 
-    if (mDaemonPid == 0) {
+    ALOGD("Stopping tethering services Iface = %s ", iface);
+    if (!iface) {
+        ALOGE("stopTethering iface name is null !!");
+        return -1;
+    }
+    for (int i = 0; i < MAX_INTERFACES; i++) {
+        if (mInterfacelist[i].iface) {
+            if (!strcmp(iface, mInterfacelist[i].iface)) {
+                free(mInterfacelist[i].iface);
+                mInterfacelist[i].iface = NULL;
+                daemonPid = mInterfacelist[i].daemonPid;
+                daemonFd = mInterfacelist[i].daemonFd;
+                mInterfacecnt--;
+                isfound = true;
+            }
+        }
+        if (isfound)
+            break;
+    }
+
+    if (daemonPid == 0) {
         ALOGE("Tethering already stopped");
         return 0;
     }
 
-    ALOGD("Stopping tethering services");
-
-    kill(mDaemonPid, SIGTERM);
-    waitpid(mDaemonPid, NULL, 0);
-    mDaemonPid = 0;
-    close(mDaemonFd);
-    mDaemonFd = -1;
+    kill(daemonPid, SIGTERM);
+    waitpid(daemonPid, NULL, 0);
+    daemonPid = 0;
+    close(daemonFd);
+    daemonFd = -1;
     ALOGD("Tethering services stopped");
     return 0;
 }
 
 bool TetherController::isTetheringStarted() {
-    return (mDaemonPid == 0 ? false : true);
+    return (mInterfacecnt == 0 ? false : true);
 }
 
 int TetherController::startV6RtrAdv(int num_ifaces, char **ifaces) {
@@ -341,12 +397,39 @@ bool TetherController::isV6RtrAdvStarted() {
 
 #define MAX_CMD_SIZE 1024
 
-int TetherController::setDnsForwarders(char **servers, int numServers) {
+int TetherController::setDnsForwarders(char *iface, char **servers,
+        int numServers)
+{
     int i;
     char daemonCmd[MAX_CMD_SIZE];
+    bool isfound = false;
+    int  daemonFd = -1;
+    int cmdLen;
+
+    if (!iface) {
+        ALOGE("setDnsForwarders iface name is null");
+        return -1;
+    }
+
+    ALOGD("setDnsForwarders Iface = %s ", iface);
+    for (int i = 0; i < MAX_INTERFACES; i++) {
+        if (mInterfacelist[i].iface) {
+            if (!strcmp(iface, mInterfacelist[i].iface)) {
+                daemonFd = mInterfacelist[i].daemonFd;
+                isfound = true;
+            }
+        }
+        if (isfound)
+            break;
+    }
+
+    if (daemonFd == -1) {
+        ALOGE("setDnsForwarders Failed");
+        return -1;
+    }
 
     strcpy(daemonCmd, "update_dns");
-    int cmdLen = strlen(daemonCmd);
+    cmdLen = strlen(daemonCmd);
 
     mDnsForwarders->clear();
     for (i = 0; i < numServers; i++) {
@@ -371,9 +454,9 @@ int TetherController::setDnsForwarders(char **servers, int numServers) {
         mDnsForwarders->push_back(a);
     }
 
-    if (mDaemonFd != -1) {
+    if (daemonFd != -1) {
         ALOGD("Sending update msg to dnsmasq [%s]", daemonCmd);
-        if (write(mDaemonFd, daemonCmd, strlen(daemonCmd) +1) < 0) {
+        if (write(daemonFd, daemonCmd, strlen(daemonCmd) +1) < 0) {
             ALOGE("Failed to send update command to dnsmasq (%s)", strerror(errno));
             mDnsForwarders->clear();
             return -1;
@@ -429,34 +512,8 @@ NetAddressCollection *TetherController::getDnsForwarders() {
     return mDnsForwarders;
 }
 
-int TetherController::applyDnsInterfaces() {
-    int i;
-    char daemonCmd[MAX_CMD_SIZE];
-
-    strcpy(daemonCmd, "update_ifaces");
-    int cmdLen = strlen(daemonCmd);
-    InterfaceCollection::iterator it;
-    bool haveInterfaces = false;
-
-    for (it = mInterfaces->begin(); it != mInterfaces->end(); ++it) {
-        cmdLen += (strlen(*it) + 1);
-        if (cmdLen + 1 >= MAX_CMD_SIZE) {
-            ALOGD("Too many DNS ifaces listed");
-            break;
-        }
-
-        strcat(daemonCmd, ":");
-        strcat(daemonCmd, *it);
-        haveInterfaces = true;
-    }
-
-    if ((mDaemonFd != -1) && haveInterfaces) {
-        ALOGD("Sending update msg to dnsmasq [%s]", daemonCmd);
-        if (write(mDaemonFd, daemonCmd, strlen(daemonCmd) +1) < 0) {
-            ALOGE("Failed to send update command to dnsmasq (%s)", strerror(errno));
-            return -1;
-        }
-    }
+int TetherController::applyDnsInterfaces(const char *iface) {
+    ALOGD("applyDnsInterfaces-->SKIPPING: Update interface msg to dnsmasq");
     return 0;
 }
 
@@ -466,7 +523,7 @@ int TetherController::tetherInterface(const char *interface) {
 
     addV6RtrAdvIface(interface);
 
-    if (applyDnsInterfaces()) {
+    if (applyDnsInterfaces(interface)) {
         InterfaceCollection::iterator it;
         for (it = mInterfaces->begin(); it != mInterfaces->end(); ++it) {
             if (!strcmp(interface, *it)) {
@@ -491,7 +548,7 @@ int TetherController::untetherInterface(const char *interface) {
             free(*it);
             mInterfaces->erase(it);
             removeV6RtrAdvIface(NULL);
-            return applyDnsInterfaces();
+            return applyDnsInterfaces(interface);
         }
     }
     errno = ENOENT;
