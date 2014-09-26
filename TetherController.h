@@ -21,6 +21,8 @@
 
 #include "List.h"
 
+#include "SecondaryTableController.h"
+
 typedef android::netd::List<char *> InterfaceCollection;
 typedef android::netd::List<struct in_addr> NetAddressCollection;
 
@@ -33,7 +35,7 @@ class TetherController {
     InterfaceCollection  *mUpstreamInterfaces;
 
 public:
-    TetherController();
+    TetherController(SecondaryTableController *ctrl);
     virtual ~TetherController();
 
     int setIpFwdEnabled(bool enable);
@@ -50,7 +52,7 @@ public:
     int tetherInterface(const char *interface);
     int untetherInterface(const char *interface);
     InterfaceCollection *getTetheredInterfaceList();
-    int startV6RtrAdv(int num_ifaces, char **ifaces);
+    int startV6RtrAdv(int num_ifaces, char **ifaces, int table_number);
     int stopV6RtrAdv();
     bool isV6RtrAdvStarted();
     int addV6RtrAdvIface(const char *iface);
@@ -59,6 +61,7 @@ public:
     int removeUpstreamInterface(char *iface);
 
 private:
+    SecondaryTableController *secondaryTableCtrl;
     int applyDnsInterfaces();
 };
 
