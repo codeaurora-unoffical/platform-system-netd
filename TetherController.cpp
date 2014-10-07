@@ -56,6 +56,8 @@
  * and a final empty string
  */
 #define RTRADVDAEMON_ARGS_COUNT     4
+#define RTRADVDAEMON_MIN_IFACES     2
+
 
 TetherController::TetherController(SecondaryTableController *ctrl) {
     mInterfaces = new InterfaceCollection();
@@ -257,6 +259,12 @@ int TetherController::startV6RtrAdv(int num_ifaces, char **ifaces, int table_num
     int pid;
     int num_processed_args = 1;
     gid_t groups [] = { AID_NET_ADMIN, AID_NET_RAW, AID_INET };
+
+    if (num_ifaces < RTRADVDAEMON_MIN_IFACES) {
+        ALOGD("Need atleast %d interfaces to start Router advertisement daemon",
+              RTRADVDAEMON_MIN_IFACES);
+        return 0;
+    }
 
     if ((pid = fork()) < 0) {
         ALOGE("%s: fork failed (%s)", __func__, strerror(errno));
