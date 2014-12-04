@@ -83,9 +83,8 @@ void *SoftapController::threadStart(void *obj){
              ALOGD("%s already exists", HOSTAPD_SOCKETS_DIR);
              closedir(dir);
          }
-         if (errno == EACCES) {
+         if (errno == EACCES)
              ALOGE("Cant open %s , check permissions ", HOSTAPD_SOCKETS_DIR);
-         }
     }
     chmod(HOSTAPD_DHCP_DIR, S_IRWXU|S_IRWXG|S_IRWXO);
 
@@ -116,7 +115,7 @@ void *SoftapController::threadStart(void *obj){
         return NULL;
     }
 
-    while (me->mHostapdFlag) {
+    while(me->mHostapdFlag) {
         int res = 0;
         char buf[256];
         char dest_str[300];
