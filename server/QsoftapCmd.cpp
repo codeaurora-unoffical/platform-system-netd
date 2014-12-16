@@ -152,6 +152,16 @@ int CommandListener::QsoftapCmd::runCommand(SocketClient *cli,
            the QSoftAP SDK */
         ALOGD("Got softap set command we are overriding");
         rc = qsapsetSoftap(argc, argv);
+    } else if (!strcmp(argv[1], "create")) {
+        if (argv[2]) {
+            ALOGD("Got softap create command we are overriding");
+            rc = qsap_create_intf(argv[2]);
+        }
+    } else if (!strcmp(argv[1], "remove")) {
+        if (argv[2]) {
+            ALOGD("Got softap remove command we are overriding");
+            rc = qsap_remove_intf(argv[2]);
+        }
     } else {
         /* all other commands will be handed off to the native handler */
         ALOGD("Got softap %s command we are passing on", argv[1]);
