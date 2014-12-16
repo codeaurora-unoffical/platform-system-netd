@@ -823,6 +823,18 @@ int CommandListener::SoftapCmd::runCommand(SocketClient *cli,
 #else
         rc = sSoftapCtrl->setSoftap(argc, argv);
 #endif
+#ifdef QSAP_WLAN
+    } else if (!strcmp(argv[1], "create")) {
+        if (argv[2]) {
+            ALOGD("Got softap create command we are overriding");
+            rc = qsap_create_intf(argv[2]);
+        }
+    } else if (!strcmp(argv[1], "remove")) {
+        if (argv[2]) {
+            ALOGD("Got softap remove command we are overriding");
+            rc = qsap_remove_intf(argv[2]);
+       }
+#endif
     } else {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Unrecognized SoftAP command", false);
         return 0;
