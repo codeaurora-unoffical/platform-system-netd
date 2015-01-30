@@ -594,13 +594,7 @@ int CommandListener::TetherCmd::runCommand(SocketClient *cli,
     }
 
     if (!strcmp(argv[1], "stop")) {
-        if (argc == 3) {
-            rc = sTetherCtrl->stopTethering(argv[2]);
-        } else {
-            cli->sendMsg(ResponseCode::CommandSyntaxError,
-                         "Missing argument", false);
-            return 0;
-        }
+        rc = sTetherCtrl->stopTethering();
     } else if (!strcmp(argv[1], "status")) {
         char *tmp = NULL;
 
@@ -638,8 +632,14 @@ int CommandListener::TetherCmd::runCommand(SocketClient *cli,
         }
 
         if (!strcmp(argv[1], "start")) {
-            int num_addrs = argc - 3;
-            int arg_index = 3;
+            if (argc % 2 == 1) {
+                cli->sendMsg(ResponseCode::CommandSyntaxError,
+                             "Bad number of arguments", false);
+                return 0;
+            }
+
+            int num_addrs = argc - 2;
+            int arg_index = 2;
             int array_index = 0;
             in_addr *addrs = (in_addr *)malloc(sizeof(in_addr) * num_addrs);
             while (array_index < num_addrs) {
@@ -649,7 +649,7 @@ int CommandListener::TetherCmd::runCommand(SocketClient *cli,
                     return 0;
                 }
             }
-            rc = sTetherCtrl->startTethering(num_addrs, addrs, argv[2]);
+            rc = sTetherCtrl->startTethering(num_addrs, addrs);
             free(addrs);
         } else if (!strcmp(argv[1], "interface")) {
             if (!strcmp(argv[2], "add")) {
@@ -669,12 +669,12 @@ int CommandListener::TetherCmd::runCommand(SocketClient *cli,
             }
         } else if (!strcmp(argv[1], "dns")) {
             if (!strcmp(argv[2], "set")) {
-                if (argc < 6) {
+                if (argc < 5) {
                     cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
                     return 0;
                 }
-                unsigned netId = stringToNetId(argv[4]);
-                rc = sTetherCtrl->setDnsForwarders(argv[3], netId, &argv[5], argc - 5);
+                unsigned netId = stringToNetId(argv[3]);
+                rc = sTetherCtrl->setDnsForwarders( netId, &argv[4], argc - 4);
             /* else if (!strcmp(argv[2], "list")) handled above */
             } else {
                 cli->sendMsg(ResponseCode::CommandParameterError,
