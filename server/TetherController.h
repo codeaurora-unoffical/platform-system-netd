@@ -26,23 +26,16 @@
 typedef android::netd::List<char *> InterfaceCollection;
 typedef android::netd::List<struct in_addr> NetAddressCollection;
 
-#define MAX_INTERFACES 2
-struct Interfacelist {
-    pid_t   daemonPid;
-    int     daemonFd;
-    char *iface;
-};
-
 class TetherController {
     InterfaceCollection  *mInterfaces;
     // NetId to use for forwarded DNS queries. This may not be the default
     // network, e.g., in the case where we are tethering to a DUN APN.
     unsigned              mDnsNetId;
     NetAddressCollection *mDnsForwarders;
+    pid_t                 mDaemonPid;
+    int                   mDaemonFd;
     pid_t                 mRtrAdvPid; // IPv6 support
     InterfaceCollection  *mUpstreamInterfaces;
-    int mInterfacecnt;
-    Interfacelist mInterfacelist[MAX_INTERFACES];
 
 public:
     TetherController();
@@ -51,13 +44,13 @@ public:
     int setIpFwdEnabled(bool enable);
     bool getIpFwdEnabled();
 
-    int startTethering(int num_addrs, struct in_addr* addrs, char *iface);
-    int stopTethering(char *iface);
+    int startTethering(int num_addrs, struct in_addr* addrs);
+    int stopTethering();
 
     bool isTetheringStarted();
 
     unsigned getDnsNetId();
-    int setDnsForwarders(char *iface, unsigned netId, char **servers, int numServers);
+    int setDnsForwarders(unsigned netId, char **servers, int numServers);
     NetAddressCollection *getDnsForwarders();
 
     int tetherInterface(const char *interface);
@@ -71,7 +64,7 @@ public:
     int removeUpstreamInterface(char *iface);
 
 private:
-    int applyDnsInterfaces(const char *iface);
+    int applyDnsInterfaces();
     int getIfaceIndexForIface(const char *iface);
 };
 
