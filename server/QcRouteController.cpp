@@ -77,8 +77,8 @@ std::string QcRouteController::_runIpCmd(const char * cmd) {
         res = cmd;
         res += ": ";
         res += line;
+        pclose(fp);
     }
-    pclose(fp);
 
     return res;
 }
