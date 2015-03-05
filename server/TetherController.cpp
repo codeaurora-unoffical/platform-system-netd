@@ -203,28 +203,33 @@ int TetherController::startTethering(int num_addrs, struct in_addr* addrs) {
 
         int num_processed_args = TETHER_START_CONST_ARG + (num_addrs/2) + 1;
         char **args = (char **)malloc(sizeof(char *) * num_processed_args);
-        args[num_processed_args - 1] = NULL;
-        args[0] = (char *)"/system/bin/dnsmasq";
-        args[1] = (char *)"--keep-in-foreground";
-        args[2] = (char *)"--no-resolv";
-        args[3] = (char *)"--no-poll";
-        args[4] = (char *)"--dhcp-authoritative";
-        // TODO: pipe through metered status from ConnService
-        args[5] = (char *)"--dhcp-option-force=43,ANDROID_METERED";
-        args[6] = (char *)"--pid-file";
-        args[7] = (char *)"";
 
-        int nextArg = TETHER_START_CONST_ARG;
-        for (int addrIndex=0; addrIndex < num_addrs;) {
-            char *start = strdup(inet_ntoa(addrs[addrIndex++]));
-            char *end = strdup(inet_ntoa(addrs[addrIndex++]));
-            asprintf(&(args[nextArg++]),"--dhcp-range=%s,%s,1h", start, end);
-        }
+        if (args != NULL) {
+            args[num_processed_args - 1] = NULL;
+            args[0] = (char *)"/system/bin/dnsmasq";
+            args[1] = (char *)"--keep-in-foreground";
+            args[2] = (char *)"--no-resolv";
+            args[3] = (char *)"--no-poll";
+            args[4] = (char *)"--dhcp-authoritative";
+            // TODO: pipe through metered status from ConnService
+            args[5] = (char *)"--dhcp-option-force=43,ANDROID_METERED";
+            args[6] = (char *)"--pid-file";
+            args[7] = (char *)"";
 
-        if (execv(args[0], args)) {
-            ALOGE("execl failed (%s)", strerror(errno));
+            int nextArg = TETHER_START_CONST_ARG;
+            for (int addrIndex=0; addrIndex < num_addrs;) {
+                char *start = strdup(inet_ntoa(addrs[addrIndex++]));
+                char *end = strdup(inet_ntoa(addrs[addrIndex++]));
+                asprintf(&(args[nextArg++]),"--dhcp-range=%s,%s,1h", start, end);
+            }
+
+            if (execv(args[0], args)) {
+               ALOGE("execl failed (%s)", strerror(errno));
+            }
+            ALOGE("Should never get here!");
+        } else {
+            ALOGE("malloc failed");
         }
-        ALOGE("Should never get here!");
         _exit(-1);
     } else {
         close(pipefd[0]);
