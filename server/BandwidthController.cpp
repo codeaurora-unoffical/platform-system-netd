@@ -136,20 +136,20 @@ const char *BandwidthController::IPT_CLEANUP_COMMANDS[] = {
 };
 
 const char *BandwidthController::IPT_SETUP_COMMANDS[] = {
-    "-w -N bw_happy_box",
-    "-w -N bw_penalty_box",
-    "-w -N bw_costly_shared",
+    "-N bw_happy_box",
+    "-N bw_penalty_box",
+    "-N bw_costly_shared",
 };
 
 const char *BandwidthController::IPT_BASIC_ACCOUNTING_COMMANDS[] = {
-    "-w -A bw_INPUT -m owner --socket-exists", /* This is a tracking rule. */
+    "-A bw_INPUT -m owner --socket-exists", /* This is a tracking rule. */
 
-    "-w -A bw_OUTPUT -m owner --socket-exists", /* This is a tracking rule. */
+    "-A bw_OUTPUT -m owner --socket-exists", /* This is a tracking rule. */
 
-    "-w -A bw_costly_shared --jump bw_penalty_box",
+    "-A bw_costly_shared --jump bw_penalty_box",
 
-    "-w -t raw -A bw_raw_PREROUTING -m owner --socket-exists", /* This is a tracking rule. */
-    "-w -t mangle -A bw_mangle_POSTROUTING -m owner --socket-exists", /* This is a tracking rule. */
+    "-t raw -A bw_raw_PREROUTING -m owner --socket-exists", /* This is a tracking rule. */
+    "-t mangle -A bw_mangle_POSTROUTING -m owner --socket-exists", /* This is a tracking rule. */
 };
 
 BandwidthController::BandwidthController(void) {
@@ -158,10 +158,12 @@ BandwidthController::BandwidthController(void) {
 int BandwidthController::runIpxtablesCmd(const char *cmd, IptJumpOp jumpHandling,
                                          IptFailureLog failureHandling) {
     int res = 0;
+    char newcmd[MAX_CMD_LEN];
 
-    ALOGV("runIpxtablesCmd(cmd=%s)", cmd);
-    res |= runIptablesCmd(cmd, jumpHandling, IptIpV4, failureHandling);
-    res |= runIptablesCmd(cmd, jumpHandling, IptIpV6, failureHandling);
+    snprintf(newcmd, sizeof(newcmd), "-w %s", cmd);
+    ALOGV(" runIpxtablesCmd(cmd=%s)", newcmd);
+    res |= runIptablesCmd(newcmd, jumpHandling, IptIpV4, failureHandling);
+    res |= runIptablesCmd(newcmd, jumpHandling, IptIpV6, failureHandling);
     return res;
 }
 
