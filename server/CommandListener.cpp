@@ -62,10 +62,10 @@ namespace {
 const unsigned NUM_OEM_IDS = NetworkController::MAX_OEM_ID - NetworkController::MIN_OEM_ID + 1;
 
 Permission stringToPermission(const char* arg) {
-    if (!strcmp(arg, "android.permission.CHANGE_NETWORK_STATE")) {
+    if (!strcmp(arg, "NETWORK")) {
         return PERMISSION_NETWORK;
     }
-    if (!strcmp(arg, "android.permission.CONNECTIVITY_INTERNAL")) {
+    if (!strcmp(arg, "SYSTEM")) {
         return PERMISSION_SYSTEM;
     }
     return PERMISSION_NONE;
@@ -101,6 +101,8 @@ ResolverController *CommandListener::sResolverCtrl = NULL;
 FirewallController *CommandListener::sFirewallCtrl = NULL;
 ClatdController *CommandListener::sClatdCtrl = NULL;
 QcRouteController *CommandListener::sQcRouteCtrl = NULL;
+bool CommandListener::IpFwdCmd::iWlanFwdEnable = false;
+bool CommandListener::IpFwdCmd::fwIpFwdEnable = false;
 
 /**
  * List of module chains to be created, along with explicit ordering. ORDERING
@@ -502,6 +504,21 @@ int CommandListener::InterfaceCmd::runCommand(SocketClient *cli,
                         "Failed to change IPv6 state", true);
             }
             return 0;
+        } else if (!strcmp(argv[1], "ipv6ndoffload")) {
+            if (argc != 4) {
+                cli->sendMsg(ResponseCode::CommandSyntaxError,
+                        "Usage: interface ipv6ndoffload <interface> <enable|disable>",
+                        false);
+                return 0;
+            }
+            int enable = !strncmp(argv[3], "enable", 7);
+            if (sInterfaceCtrl->setIPv6NdOffload(argv[2], enable) == 0) {
+                cli->sendMsg(ResponseCode::CommandOkay, "IPv6 ND offload changed", false);
+            } else {
+                cli->sendMsg(ResponseCode::OperationFailed,
+                        "Failed to change IPv6 ND offload state", true);
+            }
+            return 0;
         } else if (!strcmp(argv[1], "setmtu")) {
             if (argc != 4) {
                 cli->sendMsg(ResponseCode::CommandSyntaxError,
@@ -562,9 +579,21 @@ int CommandListener::IpFwdCmd::runCommand(SocketClient *cli,
         free(tmp);
         return 0;
     } else if (!strcmp(argv[1], "enable")) {
+        if((argc > 2) && !strcmp(argv[2], "iwlan")) {
+            iWlanFwdEnable = true;
+        } else {
+            fwIpFwdEnable = true;
+        }
         rc = sTetherCtrl->setIpFwdEnabled(true);
     } else if (!strcmp(argv[1], "disable")) {
-        rc = sTetherCtrl->setIpFwdEnabled(false);
+        if((argc > 2) && !strcmp(argv[2], "iwlan")) {
+            iWlanFwdEnable = false;
+        } else {
+            fwIpFwdEnable = false;
+        }
+        if( !iWlanFwdEnable && !fwIpFwdEnable ) {
+            rc = sTetherCtrl->setIpFwdEnabled(false);
+        }
     } else {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown ipfwd cmd", false);
         return 0;
@@ -922,6 +951,14 @@ int CommandListener::ResolverCmd::runCommand(SocketClient *cli, int argc, char *
         } else {
             cli->sendMsg(ResponseCode::CommandSyntaxError,
                     "Wrong number of arguments to resolver setnetdns", false);
+            return 0;
+        }
+    } else if (!strcmp(argv[1], "clearnetdns")) { // "resolver clearnetdns <netId>"
+        if (argc == 3) {
+            rc = sResolverCtrl->clearDnsServers(strtoul(argv[2], NULL, 0));
+        } else {
+            cli->sendMsg(ResponseCode::CommandSyntaxError,
+                    "Wrong number of arguments to resolver clearnetdns", false);
             return 0;
         }
     } else if (!strcmp(argv[1], "flushnet")) { // "resolver flushnet <netId>"
@@ -1451,26 +1488,21 @@ CommandListener::ClatdCmd::ClatdCmd() : NetdCommand("clatd") {
 int CommandListener::ClatdCmd::runCommand(SocketClient *cli, int argc,
                                                             char **argv) {
     int rc = 0;
-    if (argc < 2) {
+    if (argc < 3) {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
         return 0;
     }
 
-    if(!strcmp(argv[1], "stop")) {
-        rc = sClatdCtrl->stopClatd();
+    if (!strcmp(argv[1], "stop")) {
+        rc = sClatdCtrl->stopClatd(argv[2]);
     } else if (!strcmp(argv[1], "status")) {
         char *tmp = NULL;
-
-        asprintf(&tmp, "Clatd status: %s", (sClatdCtrl->isClatdStarted() ?
-                                                        "started" : "stopped"));
+        asprintf(&tmp, "Clatd status: %s", (sClatdCtrl->isClatdStarted(argv[2]) ?
+                                            "started" : "stopped"));
         cli->sendMsg(ResponseCode::ClatdStatusResult, tmp, false);
         free(tmp);
         return 0;
-    } else if(!strcmp(argv[1], "start")) {
-        if (argc < 3) {
-            cli->sendMsg(ResponseCode::CommandSyntaxError, "Missing argument", false);
-            return 0;
-        }
+    } else if (!strcmp(argv[1], "start")) {
         rc = sClatdCtrl->startClatd(argv[2]);
     } else {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown clatd cmd", false);
