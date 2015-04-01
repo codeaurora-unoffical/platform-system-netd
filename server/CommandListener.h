@@ -35,6 +35,7 @@
 #include "FirewallController.h"
 #include "ClatdController.h"
 #include "QcRouteController.h"
+#include "QtiBandwidthController.h"
 
 class CommandListener : public FrameworkListener {
     static TetherController *sTetherCtrl;
@@ -48,6 +49,7 @@ class CommandListener : public FrameworkListener {
     static FirewallController *sFirewallCtrl;
     static ClatdController *sClatdCtrl;
     static QcRouteController *sQcRouteCtrl;
+    static QtiBandwidthController *sQtiBandwidthCtrl;
 
 public:
     static NetworkController *sNetCtrl;

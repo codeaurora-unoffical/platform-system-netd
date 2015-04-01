@@ -1237,6 +1237,118 @@ int BandwidthController::removeCostlyAlert(const char *costName, int64_t *alertB
 }
 
 
+
+/*
+ * Parse the ptks and bytes out of:
+ *   Chain ipa tether chain  (4 references)
+ *       pkts      bytes target     prot opt in     out     source               destination
+ *         26     2373 RETURN     all  --  wlan0  rmnet0  0.0.0.0/0            0.0.0.0/0
+ *         27     2002 RETURN     all  --  rmnet0 wlan0   0.0.0.0/0            0.0.0.0/0
+ *       1040   107471 RETURN     all  --  bt-pan rmnet0  0.0.0.0/0            0.0.0.0/0
+ *       1450  1708806 RETURN     all  --  rmnet0 bt-pan  0.0.0.0/0            0.0.0.0/0
+ * It results in an error if invoked and no tethering counter rules exist. The constraint
+ * helps detect complete parsing failure.
+ */
+int BandwidthController::parseHardwareTetherStats(SocketClient *cli, const TetherStats filter,
+                                                FILE *fp, std::string &extraProcessingInfo) {
+    int res;
+    char lineBuffer[MAX_IPT_OUTPUT_LINE_LEN];
+    char iface0[MAX_IPT_OUTPUT_LINE_LEN];
+    char iface1[MAX_IPT_OUTPUT_LINE_LEN];
+    char rest[MAX_IPT_OUTPUT_LINE_LEN];
+
+    TetherStats stats;
+    char *buffPtr;
+    int64_t packets, bytes;
+    int statsFound = 0;
+
+    bool filterPair = filter.intIface[0] && filter.extIface[0];
+
+    char *filterMsg = filter.getStatsLine();
+    ALOGV("filter: %s",  filterMsg);
+    free(filterMsg);
+
+    stats = filter;
+
+    while (NULL != (buffPtr = fgets(lineBuffer, MAX_IPT_OUTPUT_LINE_LEN, fp))) {
+        /* Clean up, so a failed parse can still print info */
+        iface0[0] = iface1[0] = rest[0] = packets = bytes = 0;
+        res = sscanf(buffPtr, "%" SCNd64" %" SCNd64" RETURN all -- %s %s 0.%s",
+                &packets, &bytes, iface0, iface1, rest);
+        ALOGV("parse res=%d iface0=<%s> iface1=<%s> pkts=%" PRId64" bytes=%" PRId64" rest=<%s> orig line=<%s>", res,
+             iface0, iface1, packets, bytes, rest, buffPtr);
+        extraProcessingInfo += buffPtr;
+
+        if (res != 5) {
+            continue;
+        }
+        /*
+         * The following assumes that the 1st rule has in:extIface out:intIface,
+         * which is what NatController sets up.
+         * If not filtering, the 1st match rx, and sets up the pair for the tx side.
+         */
+        if (filter.intIface[0] && filter.extIface[0]) {
+            if (filter.intIface == iface0 && filter.extIface == iface1) {
+                ALOGV("2Filter RX iface_in=%s iface_out=%s rx_bytes=%" PRId64" rx_packets=%" PRId64" ", iface0, iface1, bytes, packets);
+                stats.rxPackets = packets;
+                stats.rxBytes = bytes;
+            } else if (filter.intIface == iface1 && filter.extIface == iface0) {
+                ALOGV("2Filter TX iface_in=%s iface_out=%s rx_bytes=%" PRId64" rx_packets=%" PRId64" ", iface0, iface1, bytes, packets);
+                stats.txPackets = packets;
+                stats.txBytes = bytes;
+            }
+        } else if (filter.intIface[0] || filter.extIface[0]) {
+            if (filter.intIface == iface0 || filter.extIface == iface1) {
+                ALOGV("1Filter RX iface_in=%s iface_out=%s rx_bytes=%" PRId64" rx_packets=%" PRId64" ", iface0, iface1, bytes, packets);
+                stats.intIface = iface0;
+                stats.extIface = iface1;
+                stats.rxPackets = packets;
+                stats.rxBytes = bytes;
+            } else if (filter.intIface == iface1 || filter.extIface == iface0) {
+                ALOGV("1Filter TX iface_in=%s iface_out=%s rx_bytes=%" PRId64" rx_packets=%" PRId64" ", iface0, iface1, bytes, packets);
+                stats.intIface = iface1;
+                stats.extIface = iface0;
+                stats.txPackets = packets;
+                stats.txBytes = bytes;
+            }
+        } else /* if (!filter.intFace[0] && !filter.extIface[0]) */ {
+            if (!stats.intIface[0]) {
+                ALOGV("0Filter RX iface_in=%s iface_out=%s rx_bytes=%" PRId64" rx_packets=%" PRId64" ", iface0, iface1, bytes, packets);
+                stats.intIface = iface0;
+                stats.extIface = iface1;
+                stats.rxPackets = packets;
+                stats.rxBytes = bytes;
+            } else if (stats.intIface == iface1 && stats.extIface == iface0) {
+                ALOGV("0Filter TX iface_in=%s iface_out=%s rx_bytes=%" PRId64" rx_packets=%" PRId64" ", iface0, iface1, bytes, packets);
+                stats.txPackets = packets;
+                stats.txBytes = bytes;
+            }
+        }
+        if (stats.rxBytes != -1 && stats.txBytes != -1) {
+            ALOGV("rx_bytes=%" PRId64" tx_bytes=%" PRId64" filterPair=%d", stats.rxBytes, stats.txBytes, filterPair);
+            /* Send out stats, and prep for the next if needed. */
+            char *msg = stats.getStatsLine();
+            if (filterPair) {
+                cli->sendMsg(ResponseCode::TetheringStatsResult, msg, false);
+                return 0;
+            } else {
+                cli->sendMsg(ResponseCode::TetheringStatsListResult, msg, false);
+                stats = filter;
+            }
+            free(msg);
+            statsFound++;
+        }
+    }
+
+    /* It is always an error to find only one side of the stats. */
+    /* It is an error to find nothing when not filtering. */
+    if (((stats.rxBytes == -1) != (stats.txBytes == -1)) ||
+        (!statsFound && !filterPair)) {
+        return -1;
+    }
+    /* Tethering stats list completed will be sent from parseForwardChainStatsv6() */
+    return 0;
+}
 /* ipv6 tethering stats collection
  * Parse the ptks and bytes out of:
  *   Chain natctrl_tether_counters (4 references)
@@ -1470,10 +1582,61 @@ char *BandwidthController::TetherStats::getStatsLine(void) const {
     return msg;
 }
 
+int BandwidthController::getHardwareTetherStats(SocketClient* cli, TetherStats &stats,
+                                                    std::string &extraProcessingInfo) {
+    int res = -1;
+    std::string fullCmd;
+    std::string hwCmd;
+    FILE *hwiptOutput;
+    int skip =0;
+
+    hwCmd = IPTABLES_PATH;
+    hwCmd += " -nvx -L ";
+    hwCmd += NatController::LOCAL_HW_TETHER_COUNTERS_CHAIN;
+    hwiptOutput = popen(hwCmd.c_str(), "r");
+    if (!hwiptOutput) {
+            ALOGE("Failed to run %s err=%s", hwCmd.c_str(), strerror(errno));
+            extraProcessingInfo += "Failed to run iptables.";
+            skip = 1;
+    }
+
+    ALOGV("  getHardwareTetherStats  hwiptOutput  %s %d", hwCmd.c_str(), skip);
+    if(!skip) {
+        res = parseHardwareTetherStats(cli, stats, hwiptOutput, extraProcessingInfo);
+        pclose(hwiptOutput);
+    }
+
+    cli->sendMsg(ResponseCode::CommandOkay, "Hardware Tethering stats list completed", false);
+
+    return res;
+}
+
 int BandwidthController::getTetherStats(SocketClient *cli, TetherStats &stats, std::string &extraProcessingInfo) {
     int res, res6;
     std::string fullCmd, fullCmd6;
     FILE *iptOutput, *iptOutput6;
+    std::string hwCmd;
+    FILE *hwiptOutput;
+    int skip =0;
+
+    hwCmd = IPTABLES_PATH;
+    hwCmd += " -nvx -L ";
+    hwCmd += NatController::LOCAL_HW_TETHER_COUNTERS_CHAIN;
+    hwiptOutput = popen(hwCmd.c_str(), "r");
+    if (!hwiptOutput) {
+            ALOGE("Failed to run %s err=%s", hwCmd.c_str(), strerror(errno));
+            extraProcessingInfo += "Failed to run iptables.";
+            skip = 1;
+        /* no need to return, it is just hw stats, why to worry if failed
+           process sw path stats */
+        /* return -1; */
+    }
+
+    ALOGV("  getTetherStats  hwiptOutput  %s ", hwCmd.c_str());
+    if(!skip){
+        res = parseHardwareTetherStats(cli, stats, hwiptOutput, extraProcessingInfo);
+        pclose(hwiptOutput);
+    }
 
     /*
      * Why not use some kind of lib to talk to iptables?

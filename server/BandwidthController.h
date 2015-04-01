@@ -97,6 +97,10 @@ public:
      * It results in an error if invoked and no tethering counter rules exist.
      */
     int getTetherStats(SocketClient *cli, TetherStats &stats, std::string &extraProcessingInfo);
+    /*
+    To get the hardware tetherd stats
+    */
+     int getHardwareTetherStats(SocketClient* cli, TetherStats &stats, std::string &extraProcessingInfo);
 
     static const char* LOCAL_INPUT;
     static const char* LOCAL_FORWARD;
@@ -178,6 +182,17 @@ protected:
      * and the rules are grouped in pairs when more that one tethering was setup.
      */
     static int parseForwardChainStats(SocketClient *cli, const TetherStats filter, FILE *fp,
+                                      std::string &extraProcessingInfo);
+    /*
+     * stats should never have only intIface initialized. Other 3 combos are ok.
+     * fp should be a file to the apropriate FORWARD chain of iptables rules.
+     * extraProcessingInfo: contains raw parsed data, and error info.
+     * This strongly requires that setup of the rules is in a specific order:
+     *  in:intIface out:extIface
+     *  in:extIface out:intIface
+     * and the rules are grouped in pairs when more that one tethering was setup.
+     */
+    static int parseHardwareTetherStats(SocketClient *cli, const TetherStats filter, FILE *fp,
                                       std::string &extraProcessingInfo);
 
     /*
