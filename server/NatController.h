@@ -34,6 +34,7 @@ public:
     static const char* LOCAL_MANGLE_FORWARD;
     static const char* LOCAL_NAT_POSTROUTING;
     static const char* LOCAL_TETHER_COUNTERS_CHAIN;
+    static const char* LOCAL_HW_TETHER_COUNTERS_CHAIN;
 
     // List of strings of interface pairs.
     std::list<std::string> ifacePairList;
