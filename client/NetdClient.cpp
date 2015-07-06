@@ -26,6 +26,15 @@
 #include <unistd.h>
 #include<dlfcn.h>
 
+#include <sys/system_properties.h>
+#include <stdlib.h>
+#define LOG_TAG "zerobalance"
+#include <cutils/log.h>
+#include <android/log.h>
+
+static const char *BackgroundDataProperty = "sys.background.data.disable";
+static const char *BackgroundDataWhitelist = "sys.background.exception.app";
+
 namespace {
 
 std::atomic_uint netIdForProcess(NETID_UNSET);
@@ -119,7 +128,46 @@ int netdClientSocket(int domain, int type, int protocol) {
     return socketFd;
 }
 
+int checkAppInWhitelist() {
+    //Zero balance handling
+    uid_t ruid = getuid();
+
+    static char property[PROP_VALUE_MAX];
+    if (__system_property_get(BackgroundDataProperty, property) > 0) {
+        if (strcmp(property, "true") == 0) {
+            ALOGE(":checkAppInWhitelist:Hit zero balance ");
+
+            //if it is in whitelist allow
+            static char appUid[PROP_VALUE_MAX];
+            if (__system_property_get(BackgroundDataWhitelist, appUid) > 0) {
+                short found = 0;
+                //Get all the uids for exception, parse
+                char *token = strtok (appUid,",");
+                while (token != NULL) {
+                    if (((uid_t)atoi(token) == ruid)) {
+                        ALOGE(":checkAppInWhitelist:in whitelist allow : %u",ruid);
+                        found = 1;
+                        break;
+                    }
+                    token = strtok (NULL, ",");
+                }
+
+                if(found == 0) {
+                    ALOGE(":checkAppInWhitelist:not in whitelist: %u",ruid);
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
 unsigned getNetworkForResolv(unsigned netId) {
+    //Check whether app in white list
+    //if it is not, then net id unset
+    if(0 == checkAppInWhitelist())
+        return NETID_UNSET;
+
     if (netId != NETID_UNSET) {
         return netId;
     }
