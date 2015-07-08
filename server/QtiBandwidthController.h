@@ -38,7 +38,6 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdlib.h>
 #include <ctype.h>
 
-
 #define __STDC_FORMAT_MACROS 1
 #include <inttypes.h>
 #include <sys/stat.h>
@@ -59,6 +58,8 @@ typedef struct ipaTetherStats{
                 }IpaTetherStats;
 
 class QtiBandwidthController {
+protected:
+    static bool tetherRulesExist;
 
 public:
     QtiBandwidthController();
@@ -81,4 +82,5 @@ static void updatePrevStats(IpaTetherStats current);
 static IpaTetherStats getModifiedStats(IpaTetherStats* curr, IpaTetherStats* prev, IpaTetherStats* last);
 static void dumpCache();
 };
+
 #endif

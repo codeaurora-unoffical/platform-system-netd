@@ -51,11 +51,11 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #define MAX_CMD_LEN  1024
 
- std::map<std::string, IpaTetherStats> prevStatsForPair;
- std::map<std::string, IpaTetherStats> LastSnapShotForPair;
- char pair_name[2*MAX_CMD_LEN+1];
+std::map<std::string, IpaTetherStats> prevStatsForPair;
+std::map<std::string, IpaTetherStats> LastSnapShotForPair;
+char pair_name[2*MAX_CMD_LEN+1];
 
-
+bool QtiBandwidthController::tetherRulesExist = false;
 
 QtiBandwidthController::QtiBandwidthController() {
     ALOGD("QtiBandwidthController init'led");
@@ -74,46 +74,77 @@ int QtiBandwidthController::updateipaTetherStats(IpaTetherStats stats, bool clea
     memset(cmd1, 0, MAX_CMD_LEN);
     memset(cmd2, 0, MAX_CMD_LEN);
     memset(cmd3, 0, MAX_CMD_LEN);
-    if (clearflag) {
-        snprintf(cmd1,
-            MAX_CMD_LEN,
-            "iptables -w -F %s ",
-            NatController::LOCAL_HW_TETHER_COUNTERS_CHAIN);
-        hwiptOutput = popen(cmd1, "r");
-        ALOGD("cmd1: %s err=%s", cmd1, strerror(errno));
-        if (hwiptOutput != NULL) {
-            pclose(hwiptOutput);
-        }
-    }
 
-    snprintf(cmd2,
+    if(!tetherRulesExist) {
+        if (clearflag) {
+            snprintf(cmd1,
+                MAX_CMD_LEN,
+                "iptables -w -F %s ",
+                NatController::LOCAL_HW_TETHER_COUNTERS_CHAIN);
+            hwiptOutput = popen(cmd1, "r");
+            ALOGD("cmd1: %s err=%s", cmd1, strerror(errno));
+            if (hwiptOutput != NULL) {
+                pclose(hwiptOutput);
+            }
+        }
+
+        snprintf(cmd2,
             MAX_CMD_LEN,
             "iptables -w -A %s -i %s -o %s --set-counters %" PRId64"  %" PRId64"  -j RETURN",
             NatController::LOCAL_HW_TETHER_COUNTERS_CHAIN,
-        stats.iif,
-        stats.oif,
-        stats.txP,
-        stats.txB);
-    hwiptOutput = popen(cmd2, "r");
-    ALOGD("cmd2: %s err=%s", cmd2, strerror(errno));
-    if (hwiptOutput != NULL) {
-        pclose(hwiptOutput);
-    }
+            stats.iif,
+            stats.oif,
+            stats.txP,
+            stats.txB);
+        hwiptOutput = popen(cmd2, "r");
+        ALOGD("cmd2: %s err=%s", cmd2, strerror(errno));
+        if (hwiptOutput != NULL) {
+            pclose(hwiptOutput);
+        }
 
-
-    memset(cmd3, 0, MAX_CMD_LEN);
-    snprintf(cmd3,
+        memset(cmd3, 0, MAX_CMD_LEN);
+        snprintf(cmd3,
             MAX_CMD_LEN,
             "iptables -w -A %s -o %s -i %s --set-counters %" PRId64"  %" PRId64"  -j RETURN",
             NatController::LOCAL_HW_TETHER_COUNTERS_CHAIN,
-        stats.iif,
-        stats.oif,
-        stats.rxP,
-        stats.rxB);
-    hwiptOutput = popen(cmd3, "r");
-    ALOGD("cmd3: %s err=%s", cmd3, strerror(errno));
-    if (hwiptOutput != NULL) {
-        pclose(hwiptOutput);
+            stats.iif,
+            stats.oif,
+            stats.rxP,
+            stats.rxB);
+        ALOGD("cmd3: %s err=%s", cmd3, strerror(errno));
+        hwiptOutput = popen(cmd3, "r");
+        if (hwiptOutput != NULL) {
+            pclose(hwiptOutput);
+        }
+        tetherRulesExist = true;
+    } else {
+        snprintf(cmd2,
+            MAX_CMD_LEN,
+            "iptables -w -R %s 1 -i %s -o %s --set-counters %" PRId64"  %" PRId64"  -j RETURN",
+            NatController::LOCAL_HW_TETHER_COUNTERS_CHAIN,
+            stats.iif,
+            stats.oif,
+            stats.txP,
+            stats.txB);
+        hwiptOutput = popen(cmd2, "r");
+        ALOGD("cmd2: %s err=%s", cmd2, strerror(errno));
+        if (hwiptOutput != NULL) {
+            pclose(hwiptOutput);
+        }
+
+        snprintf(cmd3,
+            MAX_CMD_LEN,
+            "iptables -w -R %s 2 -o %s -i %s --set-counters %" PRId64"  %" PRId64"  -j RETURN",
+            NatController::LOCAL_HW_TETHER_COUNTERS_CHAIN,
+            stats.iif,
+            stats.oif,
+            stats.rxP,
+            stats.rxB);
+        ALOGD("cmd3: %s err=%s", cmd3, strerror(errno));
+        hwiptOutput = popen(cmd3, "r");
+        if (hwiptOutput != NULL) {
+            pclose(hwiptOutput);
+        }
     }
     return 1;
 }
