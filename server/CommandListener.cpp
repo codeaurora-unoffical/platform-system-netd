@@ -49,6 +49,7 @@
 #include "RouteController.h"
 #include "UidRanges.h"
 #include "QcRouteController.h"
+#include "QtiBandwidthController.h"
 
 #ifdef QSAP_WLAN
 #include "qsap_api.h"
@@ -101,6 +102,7 @@ ResolverController *CommandListener::sResolverCtrl = NULL;
 FirewallController *CommandListener::sFirewallCtrl = NULL;
 ClatdController *CommandListener::sClatdCtrl = NULL;
 QcRouteController *CommandListener::sQcRouteCtrl = NULL;
+QtiBandwidthController *CommandListener::sQtiBandwidthCtrl = NULL;
 bool CommandListener::IpFwdCmd::iWlanFwdEnable = false;
 bool CommandListener::IpFwdCmd::fwIpFwdEnable = false;
 
@@ -265,6 +267,8 @@ CommandListener::CommandListener() :
         sClatdCtrl = new ClatdController(sNetCtrl);
     if (!sQcRouteCtrl)
         sQcRouteCtrl = new QcRouteController();
+    if (!sQtiBandwidthCtrl)
+        sQtiBandwidthCtrl = new QtiBandwidthController();
 
     /*
      * This is the only time we touch top-level chains in iptables; controllers
@@ -1341,6 +1345,29 @@ int CommandListener::BandwidthControlCmd::runCommand(SocketClient *cli, int argc
         }
         int rc = sBandwidthCtrl->removeRestrictAppsOnWlan(argc - 2, argv + 2);
         sendGenericOkFail(cli, rc);
+        return 0;
+    }
+
+        if (!strcmp(argv[1], "gethardwaretetherstats")) {
+        BandwidthController::TetherStats tetherStats;
+        std::string extraProcessingInfo = "";
+        if (argc < 2 || argc > 4) {
+            sendGenericSyntaxError(cli, "gettetherstats [<intInterface> <extInterface>]");
+            return 0;
+        }
+        tetherStats.intIface = argc > 2 ? argv[2] : "";
+        tetherStats.extIface = argc > 3 ? argv[3] : "";
+        // No filtering requested and there are no interface pairs to lookup.
+        if (argc <= 2 && sNatCtrl->ifacePairList.empty()) {
+            cli->sendMsg(ResponseCode::CommandOkay, "Tethering stats list completed", false);
+            return 0;
+        }
+        int rc = sBandwidthCtrl->getHardwareTetherStats(cli, tetherStats, extraProcessingInfo);
+        if (rc) {
+                extraProcessingInfo.insert(0, "Failed to get tethering stats.\n");
+                sendGenericOpFailed(cli, extraProcessingInfo.c_str());
+                return 0;
+        }
         return 0;
     }
 

@@ -68,6 +68,7 @@ LOCAL_SRC_FILES := \
         main.cpp \
         oem_iptables_hook.cpp \
         QcRouteController.cpp \
+        QtiBandwidthController.cpp \
 
 
 ifeq ($(BOARD_HAS_QCOM_WLAN), true)
