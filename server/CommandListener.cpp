@@ -822,6 +822,7 @@ int CommandListener::NatCmd::runCommand(SocketClient *cli,
         /* Ignore ifaces for now. */
         rc = sBandwidthCtrl->removeGlobalAlertInForwardChain();
         rc |= sNatCtrl->disableNat(argv[2], argv[3]);
+        sQtiBandwidthCtrl->clearPrevStats();
     } else {
         cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown nat cmd", false);
         return 0;

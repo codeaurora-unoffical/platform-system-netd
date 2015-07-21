@@ -64,11 +64,21 @@ public:
     QtiBandwidthController();
     virtual ~QtiBandwidthController();
 
-
 void ipaTetherStatInit();
 static bool handleInotifyEvent(int fd,int wd);
 static void handleInotifchangeEvent();
 static int updateipaTetherStats(IpaTetherStats stats,bool flag);
 static void *ipaStatsMonitorThread(void *args);
+
+void clearPrevStats();
+static std::string getPairName(IpaTetherStats temp);
+
+static IpaTetherStats* FindSnapShotForPair(std::string intfPair);
+static IpaTetherStats* FindPrevStatsForPair(std::string intfPair);
+static IpaTetherStats calculateTetherStats(IpaTetherStats current);
+static void updateSnapShot(IpaTetherStats temp);
+static void updatePrevStats(IpaTetherStats current);
+static IpaTetherStats getModifiedStats(IpaTetherStats* curr, IpaTetherStats* prev, IpaTetherStats* last);
+static void dumpCache();
 };
 #endif
