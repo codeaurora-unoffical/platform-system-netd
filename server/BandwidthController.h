@@ -81,6 +81,8 @@ public:
 
     int setInterfaceAlert(const char *iface, int64_t bytes);
     int removeInterfaceAlert(const char *iface);
+    int blockAllData();
+    int unblockAllData();
 
     /*
      * For single pair of ifaces, stats should have ifaceIn and ifaceOut initialized.

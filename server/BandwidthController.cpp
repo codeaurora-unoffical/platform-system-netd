@@ -474,6 +474,52 @@ fail_parse:
     return -1;
 }
 
+int BandwidthController::blockAllData() {
+    int res = 0;
+    IptFailureLog failureHandling = IptFailShow;
+
+    std::string iptCmd = "-I zero_balance_out -d 8.8.8.4 -p udp --dport 53 -j DROP";
+    res |= runIptablesCmd(iptCmd.c_str(), IptJumpNoAdd, IptIpV4, failureHandling);
+
+    iptCmd = "-I zero_balance_out -d 2001:4860:4860::884 -p udp --dport 53 -j DROP";
+    res |= runIptablesCmd(iptCmd.c_str(), IptJumpNoAdd, IptIpV6, failureHandling);
+
+    if (res) {
+        ALOGE("Failed to add zero balance block rule for 8.8.8.4");
+        return -1;
+    } else {
+        ALOGE("Passed to add zero balance block rule for 8.8.8.4");
+    }
+
+    res = 0;
+    failureHandling = IptFailShow;
+
+    iptCmd = "-I zero_balance_out -d 8.8.8.8 -p udp --dport 53 -j DROP";
+    res |= runIptablesCmd(iptCmd.c_str(), IptJumpNoAdd, IptIpV4, failureHandling);
+
+    iptCmd = "-I zero_balance_out -d 2001:4860:4860::8888 -p udp --dport 53 -j DROP";
+    res |= runIptablesCmd(iptCmd.c_str(), IptJumpNoAdd, IptIpV6, failureHandling);
+
+    if (res) {
+        ALOGE("Failed to add zero balance block rule for 8.8.8.8");
+        return -1;
+    } else {
+        ALOGE("Passed to add zero balance block rule for 8.8.8.8");
+    }
+    return 0;
+
+}
+int BandwidthController::unblockAllData() {
+    std::string iptCmd = "-F zero_balance_out";
+    if (runIpxtablesCmd(iptCmd.c_str(), IptJumpNoAdd)) {
+        ALOGE("Failed to flush zero balance block rules");
+        return -1;
+    }else{
+        ALOGE("Passed to flush zero balance block rules");
+    }
+   return 0;
+}
+
 std::string BandwidthController::makeIptablesQuotaCmd(IptOp op, const char *costName, int64_t quota) {
     std::string res;
     char *buff;

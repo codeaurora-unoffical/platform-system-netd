@@ -57,6 +57,13 @@ static bool oemCleanupHooks() {
             "oem_nat_pre"
     };
     runIptablesCmd(ARRAY_SIZE(cmd3), cmd3);
+
+    const char *cmd4[] = {
+            IPTABLES_PATH,
+            "-F",
+            "zero_balance_out"
+    };
+    runIptablesCmd(ARRAY_SIZE(cmd4), cmd4);
     return true;
 }
 
