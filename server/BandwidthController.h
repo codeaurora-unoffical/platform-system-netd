@@ -81,6 +81,8 @@ public:
 
     int setInterfaceAlert(const char *iface, int64_t bytes);
     int removeInterfaceAlert(const char *iface);
+    int blockAllData();
+    int unblockAllData();
 
     int addRestrictAppsOnData(int numUids, char *appUids[]);
     int removeRestrictAppsOnData(int numUids, char *appUids[]);

@@ -128,6 +128,7 @@ static const char* FILTER_OUTPUT[] = {
         OEM_IPTABLES_FILTER_OUTPUT,
         FirewallController::LOCAL_OUTPUT,
         BandwidthController::LOCAL_OUTPUT,
+        ZEROBALANCE_IPTABLES_FILTER_OUTPUT,
         NULL,
 };
 
@@ -1163,6 +1164,24 @@ int CommandListener::BandwidthControlCmd::runCommand(SocketClient *cli, int argc
             return 0;
         }
         int rc = sBandwidthCtrl->removeNaughtyApps(argc - 2, argv + 2);
+        sendGenericOkFail(cli, rc);
+        return 0;
+    }
+    if (!strcmp(argv[1], "blockAllData")) {
+        if (argc < 2) {
+            sendGenericSyntaxError(cli, "zerobalanceblock");
+            return 0;
+        }
+        int rc = sBandwidthCtrl->blockAllData();
+        sendGenericOkFail(cli, rc);
+        return 0;
+    }
+    if (!strcmp(argv[1], "unblockAllData")) {
+        if (argc < 2) {
+            sendGenericSyntaxError(cli, "zerobalanceunblock <appUid> ...");
+            return 0;
+        }
+        int rc = sBandwidthCtrl->unblockAllData();
         sendGenericOkFail(cli, rc);
         return 0;
     }
