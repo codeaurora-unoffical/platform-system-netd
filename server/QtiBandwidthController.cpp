@@ -34,12 +34,12 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #define STATS_TEMPLATE "%s %s %" PRId64" %" PRId64" %" PRId64" %" PRId64""
 
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
 
 #include <stdlib.h>
 #include <errno.h>
 #include <sys/inotify.h>
-
+#include <map>
 #include <string>
 #include <sys/types.h>
 #define LOG_TAG "QtiBandwidthController"
@@ -50,6 +50,12 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "NatController.h"
 
 #define MAX_CMD_LEN  1024
+
+ std::map<std::string, IpaTetherStats> prevStatsForPair;
+ std::map<std::string, IpaTetherStats> LastSnapShotForPair;
+ char pair_name[2*MAX_CMD_LEN+1];
+
+
 
 QtiBandwidthController::QtiBandwidthController() {
     ALOGD("QtiBandwidthController init'led");
@@ -68,7 +74,6 @@ int QtiBandwidthController::updateipaTetherStats(IpaTetherStats stats, bool clea
     memset(cmd1, 0, MAX_CMD_LEN);
     memset(cmd2, 0, MAX_CMD_LEN);
     memset(cmd3, 0, MAX_CMD_LEN);
-
     if (clearflag) {
         snprintf(cmd1,
             MAX_CMD_LEN,
@@ -105,17 +110,145 @@ int QtiBandwidthController::updateipaTetherStats(IpaTetherStats stats, bool clea
         stats.oif,
         stats.rxP,
         stats.rxB);
-    ALOGD("cmd3: %s err=%s", cmd3, strerror(errno));
     hwiptOutput = popen(cmd3, "r");
+    ALOGD("cmd3: %s err=%s", cmd3, strerror(errno));
     if (hwiptOutput != NULL) {
         pclose(hwiptOutput);
     }
     return 1;
 }
+void QtiBandwidthController::clearPrevStats() {
+    /*
+     When interface down, LastSnapShotForPair already recorded
+     so no need to have prevStatsForPair
+     and prevStatsForPair should be cleared off
+    */
+    prevStatsForPair.clear();
+    ALOGD("clearPrevStats prevStatsForPair is cleared now");
+}
+/*
+  will return from prevStatsForPair
+
+*/
+
+IpaTetherStats* QtiBandwidthController::FindSnapShotForPair(std::string intfPair) {
+    std::map<std::string, IpaTetherStats>::iterator it;
+    ALOGD("FindSnapShotForPair pair_name:%s",intfPair.c_str());
+    it = LastSnapShotForPair.find(intfPair);
+        if (it != LastSnapShotForPair.end()) {
+            return &(it->second);
+        }
+        return NULL;
+}
+/*
+  will return from LastSnapShotForPair
+
+*/
+
+IpaTetherStats* QtiBandwidthController::FindPrevStatsForPair(std::string intfPair) {
+    std::map<std::string, IpaTetherStats>::iterator it;
+    ALOGD("FindPrevStatsForPair pair_name:%s",intfPair.c_str());
+    it = prevStatsForPair.find(intfPair);
+    if (it != prevStatsForPair.end()) {
+        return &(it->second);
+    }
+    return NULL;
+}
+
+/*
+get the matching stats(from LastSnapShotForPair)
+and update it
+*/
+
+void QtiBandwidthController::updateSnapShot(IpaTetherStats temp) {
+    std::string intfPair;
+
+    intfPair = getPairName(temp);
+    std::map<std::string, IpaTetherStats>::iterator it;
+    ALOGD("updateSnapShot find key %s",intfPair.c_str());
+    dumpCache();
+    it = LastSnapShotForPair.find(intfPair);
+    if (it != LastSnapShotForPair.end()) {
+        it->second = temp;
+    } else {
+        LastSnapShotForPair.insert(
+                std::pair<std::string, IpaTetherStats>(intfPair, temp));
+    ALOGD("inserted into updateSnapShot %s",intfPair.c_str());
+    }
+}
+
+void QtiBandwidthController::updatePrevStats(IpaTetherStats current) {
+    std::string intfPair;
+
+    intfPair = getPairName(current);
+    ALOGD("updatePrevStats find key %s",intfPair.c_str());
+    std::map<std::string, IpaTetherStats>::iterator it;
+    dumpCache();
+    it = prevStatsForPair.find(intfPair);
+    if (it != prevStatsForPair.end()) {
+        it->second = current;
+    } else {
+        prevStatsForPair.insert(
+                std::pair<std::string, IpaTetherStats>(intfPair, current));
+    ALOGD("inserted into updatePrevStats %s", intfPair.c_str());
+    }
+
+}
+
+IpaTetherStats QtiBandwidthController::getModifiedStats(IpaTetherStats* curr, IpaTetherStats* prev, IpaTetherStats* last) {
+    IpaTetherStats final;
+    /* if prev , last not found , zero returned so no issue */
+
+    final.rxB= curr->rxB-prev->rxB+last->rxB;
+    final.txB= curr->txB-prev->txB+last->txB;
+
+    final.rxP= curr->rxP-prev->rxP+last->rxP;
+    final.txP= curr->txP-prev->txP+last->txP;
+
+    return final; /* local variable returning TODO */
+}
+
+std::string QtiBandwidthController:: getPairName(IpaTetherStats temp) {
+
+        memset(pair_name,0,MAX_FILE_LEN);
+        sprintf(pair_name, "%s_%s", (char*)temp.iif, (char*)temp.oif); /* KW error snprintf() ?? */
+        std::string tetherPairName=std::string(pair_name);
+        ALOGD("getPairName tetherPairName:%s",tetherPairName.c_str());
+        return tetherPairName;
+}
+/*
+Final = current-prev+lastsnapshot
+*/
+IpaTetherStats QtiBandwidthController::calculateTetherStats(IpaTetherStats current) {
+        IpaTetherStats *prev;
+        IpaTetherStats *lastsnap;
+        IpaTetherStats FinalStats;
+        IpaTetherStats dummy;
+        std::string intfPair;
+        intfPair = getPairName(current);
+        memset(&dummy,0,sizeof(struct ipaTetherStats));
+        prev      = FindPrevStatsForPair(intfPair);
+        lastsnap  = FindSnapShotForPair(intfPair);
+
+	if(prev == NULL)
+            prev = &dummy;
+        if(lastsnap == NULL)
+            lastsnap = &dummy;
+        FinalStats = getModifiedStats(&current,prev,lastsnap);
+
+	memcpy(FinalStats.oif,current.oif,MAX_FILE_LEN);
+        memcpy(FinalStats.iif,current.iif,MAX_FILE_LEN);
+
+        updateSnapShot(FinalStats);
+        updatePrevStats(current);
+
+        return FinalStats; /* local variable returning TODO */
+}
 
 void QtiBandwidthController::handleInotifchangeEvent() {
     FILE *fp;
     IpaTetherStats stat;
+    IpaTetherStats FinalStats;
     bool flag = true;
     char fname[MAX_FILE_LEN];
 
@@ -128,15 +261,19 @@ void QtiBandwidthController::handleInotifchangeEvent() {
     }
     do{
         memset(&stat,0,sizeof(struct ipaTetherStats));
+        memset(&FinalStats,0,sizeof(struct ipaTetherStats));
         /*kindly match with /data/misc/ipa/tether_stats file */
         fscanf(fp, STATS_TEMPLATE, (char*)&(stat.iif),(char*)&(stat.oif),&stat.rxB,&stat.rxP,&stat.txB,&stat.txP);
         /*No need to updated when all zeros received for some reason from IPA CM*/
         if (stat.rxB > 0 || stat.rxP > 0 || stat.txB > 0 || stat.txP > 0) {
-            updateipaTetherStats(stat,flag);
+            FinalStats = calculateTetherStats(stat);
+            updateipaTetherStats(FinalStats,flag);
         }
         flag = false;
     }while(!feof(fp));
+    ALOGD("out of while loop");
     fclose(fp);
+    ALOGD("fclose done in handlenotifchangeEvent");
 }
 
 void QtiBandwidthController::ipaTetherStatInit() {
@@ -228,3 +365,15 @@ bool QtiBandwidthController:: handleInotifyEvent(int fd,int wd) {
      }
      return false;
 }
+
+void QtiBandwidthController::dumpCache() {
+
+                for (std::map<std::string, IpaTetherStats>::iterator cacheitr =
+                        prevStatsForPair.begin();
+                        cacheitr != prevStatsForPair.end(); ++cacheitr) {
+                }
+                for (std::map<std::string, IpaTetherStats>::iterator cacheitr1 =
+                        LastSnapShotForPair.begin();
+                                        cacheitr1 != LastSnapShotForPair.end(); ++cacheitr1) {
+                                }
+      }
