@@ -128,7 +128,7 @@ int netdClientSocket(int domain, int type, int protocol) {
     return socketFd;
 }
 
-int checkAppInWhitelist() {
+unsigned checkAppInWhitelist() {
     //Zero balance handling
     uid_t ruid = getuid();
 
@@ -154,7 +154,7 @@ int checkAppInWhitelist() {
 
                 if(found == 0) {
                     ALOGE(":checkAppInWhitelist:not in whitelist: %u",ruid);
-                    return 0;
+                    return NETID_INVALID;
                 }
             }
         }
@@ -165,8 +165,8 @@ int checkAppInWhitelist() {
 unsigned getNetworkForResolv(unsigned netId) {
     //Check whether app in white list
     //if it is not, then net id unset
-    if(0 == checkAppInWhitelist())
-        return NETID_UNSET;
+    if(NETID_INVALID == checkAppInWhitelist())
+        return NETID_INVALID;
 
     if (netId != NETID_UNSET) {
         return netId;
