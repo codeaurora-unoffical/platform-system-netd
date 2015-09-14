@@ -624,6 +624,14 @@ int BandwidthController::blockAllData() {
     } else {
         ALOGE("Passed to add zero balance block rule for 8.8.8.8");
     }
+
+    iptCmd = "-I zero_balance_fwd -j DROP";
+    if (runIpxtablesCmd(iptCmd.c_str(), IptJumpNoAdd)) {
+        ALOGE("Failed to add zero balance block rules for tethering");
+        return -1;
+    } else {
+        ALOGE("Passed to add zero balance block rules for tethering");
+    }
     return 0;
 
 }
@@ -632,8 +640,15 @@ int BandwidthController::unblockAllData() {
     if (runIpxtablesCmd(iptCmd.c_str(), IptJumpNoAdd)) {
         ALOGE("Failed to flush zero balance block rules");
         return -1;
-    }else{
+    } else {
         ALOGE("Passed to flush zero balance block rules");
+    }
+    iptCmd = "-F zero_balance_fwd";
+    if (runIpxtablesCmd(iptCmd.c_str(), IptJumpNoAdd)) {
+        ALOGE("Failed to flush zero balance block rules for tethering");
+        return -1;
+    } else {
+        ALOGE("Passed to flush zero balance block rules for tethering");
     }
    return 0;
 }

@@ -64,6 +64,13 @@ static bool oemCleanupHooks() {
             "zero_balance_out"
     };
     runIptablesCmd(ARRAY_SIZE(cmd4), cmd4);
+
+    const char *cmd5[] = {
+            IPTABLES_PATH,
+            "-F",
+            "zero_balance_fwd"
+    };
+    runIptablesCmd(ARRAY_SIZE(cmd5), cmd5);
     return true;
 }
 

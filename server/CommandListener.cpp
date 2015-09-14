@@ -123,6 +123,7 @@ static const char* FILTER_FORWARD[] = {
         FirewallController::LOCAL_FORWARD,
         BandwidthController::LOCAL_FORWARD,
         NatController::LOCAL_FORWARD,
+        ZEROBALANCE_IPTABLES_FILTER_FORWARD,
         NULL,
 };
 
