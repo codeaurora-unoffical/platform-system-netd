@@ -32,6 +32,7 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define LOG_TAG "QtiConnectivityAdapter"
 
 #include <cutils/log.h>
+#include <cutils/properties.h>
 #include <dlfcn.h>
 #include <sysutils/SocketClient.h>
 #include <sysutils/SocketListener.h>
@@ -76,13 +77,19 @@ NetdCommand* getQtiConnectivityCmd(CommandListener *broadcaster) {
     return (new QtiConnectivityCommand)->asNetdCommand();
 }
 
+bool isUsbIface(const char *iface) {
+    return (strstr("rndis", iface) != NULL);
+}
+
 void natStarted(const char* tetherIface, const char* upstreamIface) {
     ALOGI("natStarted(tether=%s upstream=%s)", tetherIface, upstreamIface);
+    if (isUsbIface(tetherIface)) property_set("sys.usb.tethering", "true");
     if (_natStarted) _natStarted(tetherIface, upstreamIface);
 }
 
 void natStopped(const char* tetherIface, const char* upstreamIface) {
     ALOGI("natStopped(tether=%s upstream=%s)", tetherIface, upstreamIface);
+    if (isUsbIface(tetherIface)) property_set("sys.usb.tethering", "false");
     if (_natStopped) _natStopped(tetherIface, upstreamIface);
 }
 
