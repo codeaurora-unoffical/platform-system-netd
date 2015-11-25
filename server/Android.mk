@@ -74,6 +74,7 @@ LOCAL_SRC_FILES := \
         VirtualNetwork.cpp \
         main.cpp \
         oem_iptables_hook.cpp \
+        QtiDataController.cpp \
 
 ifdef WPA_SUPPLICANT_VERSION
   LOCAL_CFLAGS += -DLIBWPA_CLIENT_EXISTS
