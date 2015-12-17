@@ -82,6 +82,6 @@ int unblockAllData() {
 
 unsigned checkAppInWhitelist(SocketClient *cli) {
     if (_checkAppInWhitelist) return _checkAppInWhitelist(cli);
-    return -1;
+    return 0;
 }
 
