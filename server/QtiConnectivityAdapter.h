@@ -40,6 +40,7 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "NetdCommand.h"
 
 NetdCommand *getQtiConnectivityCmd(CommandListener *broadcaster);
+bool isUsbIface(const char* iface);
 void natStarted(const char* tetherIface, const char* upstreamIface);
 void natStopped(const char* tetherIface, const char* upstreamIface);
 int getV6TetherStats(SocketClient *cli, const char* tetherIface, const char* upstreamIface,
