@@ -477,9 +477,10 @@ int TetherController::addUpstreamInterface(char *iface)
 
     ALOGD("addUpstreamInterface(%s)\n", iface);
 
-    if (!iface) {
-        ALOGE("addUpstreamInterface: received null interface");
-        return 0;
+    if (!isIfaceName(iface)) {
+        ALOGE("addUpstreamInterface: received invalid interface");
+        errno = ENOENT;
+        return -1;
     }
     for (it = mUpstreamInterfaces->begin(); it != mUpstreamInterfaces->end(); ++it) {
         ALOGD(".");
