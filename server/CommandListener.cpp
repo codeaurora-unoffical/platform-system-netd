@@ -40,6 +40,7 @@
 #include "ResponseCode.h"
 #include "BandwidthController.h"
 #include "IdletimerController.h"
+#include "InterfaceController.h"
 #include "oem_iptables_hook.h"
 #include "NetdConstants.h"
 #include "FirewallController.h"
@@ -94,7 +95,6 @@ PppController *CommandListener::sPppCtrl = NULL;
 SoftapController *CommandListener::sSoftapCtrl = NULL;
 BandwidthController * CommandListener::sBandwidthCtrl = NULL;
 IdletimerController * CommandListener::sIdletimerCtrl = NULL;
-InterfaceController *CommandListener::sInterfaceCtrl = NULL;
 ResolverController *CommandListener::sResolverCtrl = NULL;
 FirewallController *CommandListener::sFirewallCtrl = NULL;
 ClatdController *CommandListener::sClatdCtrl = NULL;
@@ -211,8 +211,7 @@ CommandListener::CommandListener() :
         sResolverCtrl = new ResolverController();
     if (!sFirewallCtrl)
         sFirewallCtrl = new FirewallController();
-    if (!sInterfaceCtrl)
-        sInterfaceCtrl = new InterfaceController();
+    InterfaceController::initializeAll();
     if (!sClatdCtrl)
         sClatdCtrl = new ClatdController(sNetCtrl);
     if (!sStrictCtrl)
@@ -434,7 +433,7 @@ int CommandListener::InterfaceCmd::runCommand(SocketClient *cli,
                 return 0;
             }
             int enable = !strncmp(argv[3], "enable", 7);
-            if (sInterfaceCtrl->setIPv6PrivacyExtensions(argv[2], enable) == 0) {
+            if (InterfaceController::setIPv6PrivacyExtensions(argv[2], enable) == 0) {
                 cli->sendMsg(ResponseCode::CommandOkay, "IPv6 privacy extensions changed", false);
             } else {
                 cli->sendMsg(ResponseCode::OperationFailed,
@@ -450,7 +449,7 @@ int CommandListener::InterfaceCmd::runCommand(SocketClient *cli,
             }
 
             int enable = !strncmp(argv[3], "enable", 7);
-            if (sInterfaceCtrl->setEnableIPv6(argv[2], enable) == 0) {
+            if (InterfaceController::setEnableIPv6(argv[2], enable) == 0) {
                 cli->sendMsg(ResponseCode::CommandOkay, "IPv6 state changed", false);
             } else {
                 cli->sendMsg(ResponseCode::OperationFailed,
@@ -465,7 +464,7 @@ int CommandListener::InterfaceCmd::runCommand(SocketClient *cli,
                 return 0;
             }
             int enable = !strncmp(argv[3], "enable", 7);
-            if (sInterfaceCtrl->setIPv6NdOffload(argv[2], enable) == 0) {
+            if (InterfaceController::setIPv6NdOffload(argv[2], enable) == 0) {
                 cli->sendMsg(ResponseCode::CommandOkay, "IPv6 ND offload changed", false);
             } else {
                 cli->sendMsg(ResponseCode::OperationFailed,
@@ -478,7 +477,7 @@ int CommandListener::InterfaceCmd::runCommand(SocketClient *cli,
                         "Usage: interface setmtu <interface> <val>", false);
                 return 0;
             }
-            if (sInterfaceCtrl->setMtu(argv[2], argv[3]) == 0) {
+            if (InterfaceController::setMtu(argv[2], argv[3]) == 0) {
                 cli->sendMsg(ResponseCode::CommandOkay, "MTU changed", false);
             } else {
                 cli->sendMsg(ResponseCode::OperationFailed,
@@ -596,21 +595,16 @@ int CommandListener::TetherCmd::runCommand(SocketClient *cli,
         return 0;
     } else if (argc == 3) {
         if (!strcmp(argv[1], "interface") && !strcmp(argv[2], "list")) {
-            InterfaceCollection *ilist = sTetherCtrl->getTetheredInterfaceList();
-            InterfaceCollection::iterator it;
-            for (it = ilist->begin(); it != ilist->end(); ++it) {
-                cli->sendMsg(ResponseCode::TetherInterfaceListResult, *it, false);
+            for (const auto &ifname : sTetherCtrl->getTetheredInterfaceList()) {
+                cli->sendMsg(ResponseCode::TetherInterfaceListResult, ifname.c_str(), false);
             }
         } else if (!strcmp(argv[1], "dns") && !strcmp(argv[2], "list")) {
             char netIdStr[UINT32_STRLEN];
             snprintf(netIdStr, sizeof(netIdStr), "%u", sTetherCtrl->getDnsNetId());
             cli->sendMsg(ResponseCode::TetherDnsFwdNetIdResult, netIdStr, false);
 
-            NetAddressCollection *dlist = sTetherCtrl->getDnsForwarders();
-            NetAddressCollection::iterator it;
-
-            for (it = dlist->begin(); it != dlist->end(); ++it) {
-                cli->sendMsg(ResponseCode::TetherDnsFwdTgtListResult, inet_ntoa(*it), false);
+            for (const auto &fwdr : sTetherCtrl->getDnsForwarders()) {
+                cli->sendMsg(ResponseCode::TetherDnsFwdTgtListResult, fwdr.c_str(), false);
             }
         }
     } else {

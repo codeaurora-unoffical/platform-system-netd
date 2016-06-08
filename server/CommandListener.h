@@ -40,7 +40,6 @@ class CommandListener : public FrameworkListener {
     static SoftapController *sSoftapCtrl;
     static BandwidthController *sBandwidthCtrl;
     static IdletimerController *sIdletimerCtrl;
-    static InterfaceController *sInterfaceCtrl;
     static ResolverController *sResolverCtrl;
     static FirewallController *sFirewallCtrl;
     static ClatdController *sClatdCtrl;
