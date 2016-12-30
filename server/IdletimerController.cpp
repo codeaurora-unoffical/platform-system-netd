@@ -155,6 +155,8 @@ int IdletimerController::setDefaults() {
   const char *cmd1[] = {
       NULL, // To be filled inside runIpxtablesCmd
       "-w",
+      "-W",
+      "10000",
       "-t",
       "raw",
       "-F",
@@ -168,6 +170,8 @@ int IdletimerController::setDefaults() {
   const char *cmd2[] = {
       NULL, // To be filled inside runIpxtablesCmd
       "-w",
+      "-W",
+      "10000",
       "-t",
       "mangle",
       "-F",
@@ -204,6 +208,8 @@ int IdletimerController::modifyInterfaceIdletimer(IptOp op, const char *iface,
   const char *cmd1[] = {
       NULL, // To be filled inside runIpxtablesCmd
       "-w",
+      "-W",
+      "10000",
       "-t",
       "raw",
       (op == IptOpAdd) ? "-A" : "-D",
@@ -227,6 +233,8 @@ int IdletimerController::modifyInterfaceIdletimer(IptOp op, const char *iface,
   const char *cmd2[] = {
       NULL, // To be filled inside runIpxtablesCmd
       "-w",
+      "-W",
+      "10000",
       "-t",
       "mangle",
       (op == IptOpAdd) ? "-A" : "-D",

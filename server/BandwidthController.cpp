@@ -200,7 +200,7 @@ int BandwidthController::runIptablesCmd(const char *cmd, IptJumpOp jumpHandling,
         break;
     }
 
-    fullCmd.insert(0, " -w ");
+    fullCmd.insert(0, " -w -W 10000 ");
     fullCmd.insert(0, iptVer == IptIpV4 ? IPTABLES_PATH : IP6TABLES_PATH);
 
     if (StrncpyAndCheck(buffer, fullCmd.c_str(), sizeof(buffer))) {
@@ -1365,7 +1365,7 @@ int BandwidthController::getTetherStats(SocketClient *cli, TetherStats &stats, s
      * the wanted info.
      */
     fullCmd = IPTABLES_PATH;
-    fullCmd += " -nvx -w -L ";
+    fullCmd += " -nvx -w -W 10000 -L ";
     fullCmd += NatController::LOCAL_TETHER_COUNTERS_CHAIN;
     iptOutput = popen(fullCmd.c_str(), "r");
     if (!iptOutput) {
@@ -1386,7 +1386,7 @@ void BandwidthController::flushExistingCostlyTables(bool doClean) {
 
     /* Only lookup ip4 table names as ip6 will have the same tables ... */
     fullCmd = IPTABLES_PATH;
-    fullCmd += " -w -S";
+    fullCmd += " -w -W 10000 -S";
     iptOutput = popen(fullCmd.c_str(), "r");
     if (!iptOutput) {
             ALOGE("Failed to run %s err=%s", fullCmd.c_str(), strerror(errno));
