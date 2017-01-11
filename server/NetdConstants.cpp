@@ -76,6 +76,8 @@ static int execIptables(IptablesTarget target, bool silent, va_list args) {
 
     // Wait to avoid failure due to another process holding the lock
     argsList.push_back("-w");
+    argsList.push_back("-W");
+    argsList.push_back("10000");
 
     do {
         arg = va_arg(args, const char *);
