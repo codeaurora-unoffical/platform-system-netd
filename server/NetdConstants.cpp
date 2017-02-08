@@ -36,6 +36,7 @@ const char * const IPTABLES_PATH = "/system/bin/iptables";
 const char * const IP6TABLES_PATH = "/system/bin/ip6tables";
 const char * const IPTABLES_RESTORE_PATH = "/system/bin/iptables-restore";
 const char * const IP6TABLES_RESTORE_PATH = "/system/bin/ip6tables-restore";
+const char * const IPTABLES_RETRY_INTERVAL = "10000";
 const char * const TC_PATH = "/system/bin/tc";
 const char * const IP_PATH = "/system/bin/ip";
 const char * const ADD = "add";
@@ -78,6 +79,8 @@ static int execIptables(IptablesTarget target, bool silent, va_list args) {
 
     // Wait to avoid failure due to another process holding the lock
     argsList.push_back("-w");
+    argsList.push_back("-W");
+    argsList.push_back(IPTABLES_RETRY_INTERVAL);
 
     do {
         arg = va_arg(args, const char *);
@@ -124,6 +127,8 @@ static int execIptablesRestoreCommand(const char *cmd, const std::string& comman
         cmd,
         "--noflush",  // Don't flush the whole table.
         "-w",         // Wait instead of failing if the lock is held.
+        "-W",
+        IPTABLES_RETRY_INTERVAL,
     };
     AndroidForkExecvpOption opt[1] = {
         {
