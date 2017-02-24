@@ -423,7 +423,7 @@ int TetherController::addUpstreamInterface(char *iface)
 
     ALOGD("addUpstreamInterface(%s)\n", iface);
 
-    if (!isIfaceName(iface)) {
+    if (!iface || !isIfaceName(iface)) {
         ALOGE("addUpstreamInterface: received invalid interface");
         errno = ENOENT;
         return -1;
