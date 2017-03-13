@@ -408,7 +408,7 @@ int NatController::setForwardRules(bool add, const char *intIface, const char *e
     return 0;
 
 err_rpfilter:
-    cmd3[2] = "-D";
+    cmd3[4] = "-D";
     runCmd(ARRAY_SIZE(cmd3), cmd3);
 err_return:
     cmd2[4] = "-D";

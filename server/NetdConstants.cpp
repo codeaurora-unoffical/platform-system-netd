@@ -127,8 +127,6 @@ static int execIptablesRestoreCommand(const char *cmd, const std::string& comman
         cmd,
         "--noflush",  // Don't flush the whole table.
         "-w",         // Wait instead of failing if the lock is held.
-        "-W",
-        IPTABLES_RETRY_INTERVAL,
     };
     AndroidForkExecvpOption opt[1] = {
         {
