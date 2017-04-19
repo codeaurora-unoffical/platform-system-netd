@@ -19,6 +19,8 @@
 
 #include <string>
 #include <list>
+#include <ifaddrs.h>
+#include <netdb.h>
 #include <stdarg.h>
 
 #include <chrono>
@@ -32,6 +34,7 @@ const int MAX_SYSTEM_UID = AID_APP - 1;
 
 extern const char * const IPTABLES_PATH;
 extern const char * const IP6TABLES_PATH;
+extern const char * const IPTABLES_RETRY_INTERVAL;
 extern const char * const IP_PATH;
 extern const char * const TC_PATH;
 extern const char * const OEM_SCRIPT_PATH;
@@ -72,6 +75,28 @@ public:
 private:
     std::chrono::time_point<std::chrono::steady_clock> mStart;
 };
+
+
+struct AddrinfoDeleter {
+    void operator()(struct addrinfo* p) const {
+        if (p != nullptr) {
+            freeaddrinfo(p);
+        }
+    }
+};
+
+typedef std::unique_ptr<struct addrinfo, struct AddrinfoDeleter> ScopedAddrinfo;
+
+
+struct IfaddrsDeleter {
+    void operator()(struct ifaddrs *p) const {
+        if (p != nullptr) {
+            freeifaddrs(p);
+        }
+    }
+};
+
+typedef std::unique_ptr<struct ifaddrs, struct IfaddrsDeleter> ScopedIfaddrs;
 
 namespace android {
 namespace net {
