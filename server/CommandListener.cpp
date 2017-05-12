@@ -50,6 +50,7 @@
 #include "UidRanges.h"
 #include "QtiConnectivityAdapter.h"
 #include "QtiDataController.h"
+#include "PerfTunerAdapter.h"
 
 #ifdef QSAP_WLAN
 #include "qsap_api.h"
@@ -207,6 +208,7 @@ CommandListener::CommandListener() :
     registerLockingCmd(new NetworkCommand());
     registerLockingCmd(new StrictCmd());
     registerLockingCmd(getQtiConnectivityCmd(this));
+    registerLockingCmd(getPerfTunerCmd(this));
 
     initializeDataControllerLib();
 
