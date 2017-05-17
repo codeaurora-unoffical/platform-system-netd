@@ -1726,6 +1726,26 @@ int CommandListener::NetworkCommand::runCommand(SocketClient* client, int argc, 
         return success(client);
     }
 
+    //    0     1    2       3
+    // network get netid <interface>
+
+    if (!strncmp(argv[1], "get", 3)) {
+        if (argc!= 4) {
+            return syntaxError(client, "Missing argument");
+        }
+        unsigned netId = 0;
+        if (!strncmp(argv[2] , "netid", 5)) {
+            if (!(netId = sNetCtrl->getNetworkForInterface(argv[3]))) {
+                return operationError(client, "getNetworkForInterface() failed", -1);
+            } else {
+                char buffer[UINT32_STRLEN];
+                snprintf(buffer, UINT32_STRLEN, "%u", netId);
+                client->sendMsg(ResponseCode::CommandOkay, buffer, false);
+            }
+        }
+        return success(client);
+    }
+
     //    0      1       2         3
     // network create <netId> [permission]
     //
