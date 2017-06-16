@@ -14,7 +14,6 @@
 
 cc_library {
     name: "libnetd_client",
-
     srcs: [
         "FwmarkClient.cpp",
         "NetdClient.cpp",
@@ -34,6 +33,6 @@ cc_library {
         "-Wall",
         "-Werror",
     ],
-
+    cppflags: ["-DUSE_WRAPPER"],
     clang: true,
 }
