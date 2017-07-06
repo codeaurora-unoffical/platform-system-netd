@@ -34,6 +34,7 @@
 #include "IptablesBaseTest.h"
 #include "tun_interface.h"
 
+using android::base::Join;
 using android::base::StringPrintf;
 using android::net::TunInterface;
 
@@ -196,6 +197,8 @@ TEST_F(BandwidthControllerTest, TestEnableDataSaver) {
 const std::vector<std::string> makeInterfaceQuotaCommands(const std::string& iface, int ruleIndex,
                                                           int64_t quota) {
     std::vector<std::string> cmds = {
+        "*filter",
+        StringPrintf(":bw_costly_%s -", iface),
         StringPrintf("-N bw_costly_%s", iface),
         StringPrintf("-F bw_costly_%s", iface),
         StringPrintf("-A bw_costly_%s -j bw_penalty_box", iface),
@@ -204,19 +207,22 @@ const std::vector<std::string> makeInterfaceQuotaCommands(const std::string& ifa
         StringPrintf("-A bw_FORWARD -o %s --jump bw_costly_%s", iface, iface),
         StringPrintf("-A bw_costly_%s -m quota2 ! --quota %" PRIu64 " --name %s --jump REJECT",
                      iface, quota, iface),
+        "COMMIT\n",
     };
-    return cmds;
+    return {Join(cmds, "\n")};
 }
 
 const std::vector<std::string> removeInterfaceQuotaCommands(const char *iface) {
     std::vector<std::string> cmds = {
+        "*filter",
         StringPrintf("-D bw_INPUT -i %s --jump bw_costly_%s", iface, iface),
         StringPrintf("-D bw_OUTPUT -o %s --jump bw_costly_%s", iface, iface),
         StringPrintf("-D bw_FORWARD -o %s --jump bw_costly_%s", iface, iface),
         StringPrintf("-F bw_costly_%s", iface),
         StringPrintf("-X bw_costly_%s", iface),
+        "COMMIT\n",
     };
-    return cmds;
+    return {Join(cmds, "\n")};
 }
 
 TEST_F(BandwidthControllerTest, TestSetInterfaceQuota) {
@@ -228,7 +234,7 @@ TEST_F(BandwidthControllerTest, TestSetInterfaceQuota) {
 
     expected = removeInterfaceQuotaCommands(iface);
     EXPECT_EQ(0, mBw.removeInterfaceQuota(iface));
-    expectIptablesCommands(expected);
+    expectIptablesRestoreCommands(expected);
 }
 #endif
 
