@@ -47,7 +47,7 @@
 #include "FirewallController.h"
 #include "RouteController.h"
 #include "UidRanges.h"
-
+#include "QtiDataController.h"
 #include <string>
 #include <vector>
 
@@ -989,6 +989,15 @@ int CommandListener::BandwidthControlCmd::runCommand(SocketClient *cli, int argc
         return 0;
 
     }
+    if (!strcmp(argv[1], "enableMms")) {
+        if (argc < 3) {
+            sendGenericSyntaxError(cli, "enableMms input parameter error");
+            return 0;
+        }
+        bool rc = enableMms(argv[2]);
+        sendGenericOkFail(cli, rc);
+        return 0;
+    }
 
     cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown bandwidth cmd", false);
     return 0;
@@ -1144,39 +1153,6 @@ int CommandListener::FirewallCmd::runCommand(SocketClient *cli, int argc,
         FirewallRule rule = parseRule(argv[3]);
 
         int res = gCtls->firewallCtrl.setInterfaceRule(iface, rule);
-        return sendGenericOkFail(cli, res);
-    }
-
-    if (!strcmp(argv[1], "set_egress_source_rule")) {
-        if (argc != 4) {
-            cli->sendMsg(ResponseCode::CommandSyntaxError,
-                         "Usage: firewall set_egress_source_rule <192.168.0.1> <allow|deny>",
-                         false);
-            return 0;
-        }
-
-        const char* addr = argv[2];
-        FirewallRule rule = parseRule(argv[3]);
-
-        int res = gCtls->firewallCtrl.setEgressSourceRule(addr, rule);
-        return sendGenericOkFail(cli, res);
-    }
-
-    if (!strcmp(argv[1], "set_egress_dest_rule")) {
-        if (argc != 5) {
-            cli->sendMsg(ResponseCode::CommandSyntaxError,
-                         "Usage: firewall set_egress_dest_rule <192.168.0.1> <80> <allow|deny>",
-                         false);
-            return 0;
-        }
-
-        const char* addr = argv[2];
-        int port = atoi(argv[3]);
-        FirewallRule rule = parseRule(argv[4]);
-
-        int res = 0;
-        res |= gCtls->firewallCtrl.setEgressDestRule(addr, PROTOCOL_TCP, port, rule);
-        res |= gCtls->firewallCtrl.setEgressDestRule(addr, PROTOCOL_UDP, port, rule);
         return sendGenericOkFail(cli, res);
     }
 

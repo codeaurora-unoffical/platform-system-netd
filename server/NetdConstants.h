@@ -32,6 +32,8 @@
 const int PROTECT_MARK = 0x1;
 const int MAX_SYSTEM_UID = AID_APP - 1;
 
+extern const size_t SHA256_SIZE;
+
 extern const char * const IPTABLES_PATH;
 extern const char * const IP6TABLES_PATH;
 extern const char * const IP_PATH;
@@ -49,7 +51,7 @@ int execIptablesRestoreWithOutput(IptablesTarget target, const std::string& comm
                                   std::string *output);
 int execIptablesRestoreCommand(IptablesTarget target, const std::string& table,
                                const std::string& command, std::string *output);
-bool isIfaceName(const char *name);
+bool isIfaceName(const std::string& name);
 int parsePrefix(const char *prefix, uint8_t *family, void *address, int size, uint8_t *prefixlen);
 void blockSigpipe();
 

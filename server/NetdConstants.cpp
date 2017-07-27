@@ -20,6 +20,7 @@
 #include <netdb.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <openssl/ssl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -33,6 +34,8 @@
 #include "Controllers.h"
 #include "NetdConstants.h"
 #include "IptablesRestoreController.h"
+
+const size_t SHA256_SIZE = EVP_MD_size(EVP_sha256());
 
 const char * const OEM_SCRIPT_PATH = "/system/bin/oem-iptables-init.sh";
 const char * const IPTABLES_PATH = "/system/bin/iptables";
@@ -140,10 +143,9 @@ int execIptablesRestoreCommand(IptablesTarget target, const std::string& table,
  * Check an interface name for plausibility. This should e.g. help against
  * directory traversal.
  */
-bool isIfaceName(const char *name) {
+bool isIfaceName(const std::string& name) {
     size_t i;
-    size_t name_len = strlen(name);
-    if ((name_len == 0) || (name_len > IFNAMSIZ)) {
+    if ((name.empty()) || (name.size() > IFNAMSIZ)) {
         return false;
     }
 
@@ -152,7 +154,7 @@ bool isIfaceName(const char *name) {
         return false;
     }
 
-    for (i = 1; i < name_len; i++) {
+    for (i = 1; i < name.size(); i++) {
         if (!isalnum(name[i]) && (name[i] != '_') && (name[i] != '-') && (name[i] != ':')) {
             return false;
         }

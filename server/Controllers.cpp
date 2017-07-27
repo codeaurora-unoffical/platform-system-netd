@@ -72,6 +72,12 @@ static const char* MANGLE_POSTROUTING[] = {
         NULL,
 };
 
+static const char* MANGLE_INPUT[] = {
+        WakeupController::LOCAL_MANGLE_INPUT,
+        RouteController::LOCAL_MANGLE_INPUT,
+        NULL,
+};
+
 static const char* MANGLE_FORWARD[] = {
         NatController::LOCAL_MANGLE_FORWARD,
         NULL,
@@ -116,7 +122,18 @@ static void createChildChains(IptablesTarget target, const char* table, const ch
 
 }  // namespace
 
-Controllers::Controllers() : clatdCtrl(&netCtrl) {
+Controllers::Controllers()
+    : clatdCtrl(&netCtrl),
+      wakeupCtrl(
+          [this](const std::string& prefix, uid_t uid, gid_t gid, uint64_t timestampNs) {
+              const auto listener = eventReporter.getNetdEventListener();
+              if (listener == nullptr) {
+                  ALOGE("getNetdEventListener() returned nullptr. dropping wakeup event");
+                  return;
+              }
+              listener->onWakeupEvent(String16(prefix.c_str()), uid, gid, timestampNs);
+          },
+          &iptablesRestoreCtrl) {
     InterfaceController::initializeAll();
 }
 
@@ -141,6 +158,7 @@ void Controllers::initIptablesRules() {
     createChildChains(V4V6, "raw", "PREROUTING", RAW_PREROUTING, true);
     createChildChains(V4V6, "mangle", "POSTROUTING", MANGLE_POSTROUTING, false);
     createChildChains(V4V6, "mangle", "FORWARD", MANGLE_FORWARD, true);
+    createChildChains(V4V6, "mangle", "INPUT", MANGLE_INPUT, true);
     createChildChains(V4, "nat", "PREROUTING", NAT_PREROUTING, true);
     createChildChains(V4, "nat", "POSTROUTING", NAT_POSTROUTING, true);
     ALOGI("Creating child chains: %.1fms", s.getTimeAndReset());
