@@ -39,7 +39,7 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 using android::base::StringAppendF;
 using android::base::StringPrintf;
 
-int iptablesRestoreFunction(IptablesTarget target, const std::string &commands) {
+static int iptablesRestoreFunction(IptablesTarget target, const std::string &commands) {
     return execIptablesRestore(target, commands);
 }
 
