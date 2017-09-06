@@ -38,6 +38,8 @@ static bool oemCleanupHooks() {
     const char *cmd1[] = {
             IPTABLES_PATH,
             "-w",
+            "-W",
+            "10000",
             "-F",
             "oem_out"
     };
@@ -46,6 +48,8 @@ static bool oemCleanupHooks() {
     const char *cmd2[] = {
             IPTABLES_PATH,
             "-w",
+            "-W",
+            "10000",
             "-F",
             "oem_fwd"
     };
@@ -54,6 +58,8 @@ static bool oemCleanupHooks() {
     const char *cmd3[] = {
             IPTABLES_PATH,
             "-w",
+            "-W",
+            "10000",
             "-t",
             "nat",
             "-F",
