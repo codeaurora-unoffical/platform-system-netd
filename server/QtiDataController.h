@@ -41,8 +41,6 @@ enum IptIpVersion {
 const int MAX_CMD_LEN = 1024;
 const int MAX_CMD_ARGS = 32;
 
-int iptablesRestoreFunction(IptablesTarget target, const std::string &commands);
-
 bool prepare(std::string name);
 
 bool enableMms(char *uids);
