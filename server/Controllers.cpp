@@ -46,7 +46,7 @@ static const char* FILTER_FORWARD[] = {
         OEM_IPTABLES_FILTER_FORWARD,
         FirewallController::LOCAL_FORWARD,
         BandwidthController::LOCAL_FORWARD,
-        NatController::LOCAL_FORWARD,
+        TetherController::LOCAL_FORWARD,
         NULL,
 };
 
@@ -61,7 +61,7 @@ static const char* FILTER_OUTPUT[] = {
 static const char* RAW_PREROUTING[] = {
         BandwidthController::LOCAL_RAW_PREROUTING,
         IdletimerController::LOCAL_RAW_PREROUTING,
-        NatController::LOCAL_RAW_PREROUTING,
+        TetherController::LOCAL_RAW_PREROUTING,
         NULL,
 };
 
@@ -73,7 +73,7 @@ static const char* MANGLE_POSTROUTING[] = {
 };
 
 static const char* MANGLE_FORWARD[] = {
-        NatController::LOCAL_MANGLE_FORWARD,
+        TetherController::LOCAL_MANGLE_FORWARD,
         NULL,
 };
 
@@ -83,7 +83,7 @@ static const char* NAT_PREROUTING[] = {
 };
 
 static const char* NAT_POSTROUTING[] = {
-        NatController::LOCAL_NAT_POSTROUTING,
+        TetherController::LOCAL_NAT_POSTROUTING,
         NULL,
 };
 
@@ -154,8 +154,8 @@ void Controllers::initIptablesRules() {
     ALOGI("Setting up FirewallController hooks: %.1fms", s.getTimeAndReset());
 
     /* Does DROPs in FORWARD by default */
-    natCtrl.setupIptablesHooks();
-    ALOGI("Setting up NatController hooks: %.1fms", s.getTimeAndReset());
+    tetherCtrl.setupIptablesHooks();
+    ALOGI("Setting up TetherController hooks: %.1fms", s.getTimeAndReset());
 
     /*
      * Does REJECT in INPUT, OUTPUT. Does counting also.

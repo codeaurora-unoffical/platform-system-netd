@@ -27,7 +27,7 @@ LOCAL_SHARED_LIBRARIES := \
         libbinder \
         libutils
 LOCAL_EXPORT_C_INCLUDE_DIRS := $(LOCAL_PATH)/binder
-LOCAL_AIDL_INCLUDES := $(LOCAL_PATH)/binder
+LOCAL_AIDL_INCLUDES := $(LOCAL_PATH)/binder frameworks/native/aidl/binder
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/binder
 LOCAL_SRC_FILES := \
         binder/android/net/INetd.aidl \
@@ -74,6 +74,7 @@ LOCAL_SHARED_LIBRARIES := \
         libmdnssd \
         libnetdaidl \
         libnetutils \
+        libnetdutils \
         libnl \
         libsysutils \
         libbase \
@@ -96,7 +97,6 @@ LOCAL_SRC_FILES := \
         IptablesRestoreController.cpp \
         LocalNetwork.cpp \
         MDnsSdListener.cpp \
-        NatController.cpp \
         NetdCommand.cpp \
         NetdConstants.cpp \
         NetdHwService.cpp \
@@ -166,11 +166,11 @@ LOCAL_SRC_FILES := \
         BandwidthController.cpp BandwidthControllerTest.cpp \
         FirewallControllerTest.cpp FirewallController.cpp \
         IdletimerController.cpp \
-        NatControllerTest.cpp NatController.cpp \
         NetlinkCommands.cpp \
         RouteController.cpp RouteControllerTest.cpp \
         SockDiagTest.cpp SockDiag.cpp \
         StrictController.cpp StrictControllerTest.cpp \
+        TetherController.cpp TetherControllerTest.cpp \
         UidRanges.cpp \
         binder/android/net/UidRange.cpp \
         binder/android/net/metrics/INetdEventListener.aidl \
@@ -184,6 +184,7 @@ LOCAL_SHARED_LIBRARIES := \
         liblog \
         liblogwrap \
         libnetutils \
+        libnetdutils \
         libsysutils \
         libutils \
 

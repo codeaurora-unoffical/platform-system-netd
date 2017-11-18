@@ -18,9 +18,9 @@
 
 #include <list>
 #include <string>
-#include <utility>  // for pair
+#include <utility>
+#include <vector>
 
-#include <sysutils/SocketClient.h>
 #include <utils/RWLock.h>
 
 #include "NetdConstants.h"
@@ -29,57 +29,21 @@ class BandwidthController {
 public:
     android::RWLock lock;
 
-    class TetherStats {
-    public:
-        TetherStats(void)
-                : rxBytes(-1), rxPackets(-1),
-                    txBytes(-1), txPackets(-1) {};
-        TetherStats(std::string intIfn, std::string extIfn,
-                int64_t rxB, int64_t rxP,
-                int64_t txB, int64_t txP)
-                        : intIface(intIfn), extIface(extIfn),
-                            rxBytes(rxB), rxPackets(rxP),
-                            txBytes(txB), txPackets(txP) {};
-        /* Internal interface. Same as NatController's notion. */
-        std::string intIface;
-        /* External interface. Same as NatController's notion. */
-        std::string extIface;
-        int64_t rxBytes, rxPackets;
-        int64_t txBytes, txPackets;
-        /*
-         * Allocates a new string representing this:
-         * intIface extIface rx_bytes rx_packets tx_bytes tx_packets
-         * The caller is responsible for free()'ing the returned ptr.
-         */
-        char *getStatsLine(void) const;
-
-        bool addStatsIfMatch(const TetherStats& other) {
-            if (intIface == other.intIface && extIface == other.extIface) {
-                rxBytes   += other.rxBytes;
-                rxPackets += other.rxPackets;
-                txBytes   += other.txBytes;
-                txPackets += other.txPackets;
-                return true;
-            }
-            return false;
-        }
-    };
-
     BandwidthController();
 
-    int setupIptablesHooks(void);
+    int setupIptablesHooks();
 
     int enableBandwidthControl(bool force);
-    int disableBandwidthControl(void);
+    int disableBandwidthControl();
     int enableDataSaver(bool enable);
 
-    int setInterfaceSharedQuota(const char *iface, int64_t bytes);
+    int setInterfaceSharedQuota(const std::string& iface, int64_t bytes);
     int getInterfaceSharedQuota(int64_t *bytes);
-    int removeInterfaceSharedQuota(const char *iface);
+    int removeInterfaceSharedQuota(const std::string& iface);
 
-    int setInterfaceQuota(const char *iface, int64_t bytes);
-    int getInterfaceQuota(const char *iface, int64_t *bytes);
-    int removeInterfaceQuota(const char *iface);
+    int setInterfaceQuota(const std::string& iface, int64_t bytes);
+    int getInterfaceQuota(const std::string& iface, int64_t* bytes);
+    int removeInterfaceQuota(const std::string& iface);
 
     int addNaughtyApps(int numUids, char *appUids[]);
     int removeNaughtyApps(int numUids, char *appUids[]);
@@ -87,33 +51,23 @@ public:
     int removeNiceApps(int numUids, char *appUids[]);
 
     int setGlobalAlert(int64_t bytes);
-    int removeGlobalAlert(void);
-    int setGlobalAlertInForwardChain(void);
-    int removeGlobalAlertInForwardChain(void);
+    int removeGlobalAlert();
+    int setGlobalAlertInForwardChain();
+    int removeGlobalAlertInForwardChain();
 
     int setSharedAlert(int64_t bytes);
-    int removeSharedAlert(void);
+    int removeSharedAlert();
 
-    int setInterfaceAlert(const char *iface, int64_t bytes);
-    int removeInterfaceAlert(const char *iface);
+    int setInterfaceAlert(const std::string& iface, int64_t bytes);
+    int removeInterfaceAlert(const std::string& iface);
 
-    /*
-     * For single pair of ifaces, stats should have ifaceIn and ifaceOut initialized.
-     * For all pairs, stats should have ifaceIn=ifaceOut="".
-     * Sends out to the cli the single stat (TetheringStatsReluts) or a list of stats
-     * (TetheringStatsListResult+CommandOkay).
-     * Error is to be handled on the outside.
-     * It results in an error if invoked and no tethering counter rules exist.
-     */
-    int getTetherStats(SocketClient *cli, TetherStats &stats, std::string &extraProcessingInfo);
+    static const char LOCAL_INPUT[];
+    static const char LOCAL_FORWARD[];
+    static const char LOCAL_OUTPUT[];
+    static const char LOCAL_RAW_PREROUTING[];
+    static const char LOCAL_MANGLE_POSTROUTING[];
 
-    static const char* LOCAL_INPUT;
-    static const char* LOCAL_FORWARD;
-    static const char* LOCAL_OUTPUT;
-    static const char* LOCAL_RAW_PREROUTING;
-    static const char* LOCAL_MANGLE_POSTROUTING;
-
-protected:
+  private:
     class QuotaInfo {
     public:
       QuotaInfo(std::string ifn, int64_t q, int64_t a)
@@ -135,54 +89,30 @@ protected:
     enum IptFailureLog { IptFailShow, IptFailHide = IptFailShow };
 #endif
 
-    int manipulateSpecialApps(int numUids, char *appStrUids[],
-                               const char *chain,
-                               IptJumpOp jumpHandling, IptOp appOp);
-    int manipulateNaughtyApps(int numUids, char *appStrUids[], IptOp appOp);
-    int manipulateNiceApps(int numUids, char *appStrUids[], IptOp appOp);
+    int manipulateSpecialApps(const std::vector<std::string>& appStrUids, const std::string& chain,
+                              IptJumpOp jumpHandling, IptOp appOp);
 
-    int prepCostlyIface(const char *ifn, QuotaType quotaType);
-    int cleanupCostlyIface(const char *ifn, QuotaType quotaType);
+    int prepCostlyIface(const std::string& ifn, QuotaType quotaType);
+    int cleanupCostlyIface(const std::string& ifn, QuotaType quotaType);
 
-    std::string makeIptablesSpecialAppCmd(IptOp op, int uid, const char *chain);
-    std::string makeIptablesQuotaCmd(IptFullOp op, const char *costName, int64_t quota);
+    std::string makeIptablesQuotaCmd(IptFullOp op, const std::string& costName, int64_t quota);
 
-    int runIptablesAlertCmd(IptOp op, const char *alertName, int64_t bytes);
-    int runIptablesAlertFwdCmd(IptOp op, const char *alertName, int64_t bytes);
+    int runIptablesAlertCmd(IptOp op, const std::string& alertName, int64_t bytes);
+    int runIptablesAlertFwdCmd(IptOp op, const std::string& alertName, int64_t bytes);
 
-    /* Runs for both ipv4 and ipv6 iptables */
-    int runCommands(int numCommands, const char *commands[], RunCmdErrHandling cmdErrHandling);
     /* Runs for both ipv4 and ipv6 iptables, appends -j REJECT --reject-with ...  */
-    static int runIpxtablesCmd(const char *cmd, IptJumpOp jumpHandling,
+    static int runIpxtablesCmd(const std::string& cmd, IptJumpOp jumpHandling,
                                IptFailureLog failureHandling = IptFailShow);
-    static int runIptablesCmd(const char *cmd, IptJumpOp jumpHandling, IptIpVer iptIpVer,
+    static int runIptablesCmd(const std::string& cmd, IptJumpOp jumpHandling, IptIpVer iptIpVer,
                               IptFailureLog failureHandling = IptFailShow);
 
-
     // Provides strncpy() + check overflow.
-    static int StrncpyAndCheck(char *buffer, const char *src, size_t buffSize);
+    static int StrncpyAndCheck(char* buffer, const std::string& src, size_t buffSize);
 
-    int updateQuota(const char *alertName, int64_t bytes);
+    int updateQuota(const std::string& alertName, int64_t bytes);
 
-    int setCostlyAlert(const char *costName, int64_t bytes, int64_t *alertBytes);
-    int removeCostlyAlert(const char *costName, int64_t *alertBytes);
-
-    typedef std::vector<TetherStats> TetherStatsList;
-
-    static void addStats(TetherStatsList& statsList, const TetherStats& stats);
-
-    /*
-     * stats should never have only intIface initialized. Other 3 combos are ok.
-     * fp should be a file to the apropriate FORWARD chain of iptables rules.
-     * extraProcessingInfo: contains raw parsed data, and error info.
-     * This strongly requires that setup of the rules is in a specific order:
-     *  in:intIface out:extIface
-     *  in:extIface out:intIface
-     * and the rules are grouped in pairs when more that one tethering was setup.
-     */
-    static int addForwardChainStats(const TetherStats& filter,
-                                    TetherStatsList& statsList, const std::string& iptOutput,
-                                    std::string &extraProcessingInfo);
+    int setCostlyAlert(const std::string& costName, int64_t bytes, int64_t* alertBytes);
+    int removeCostlyAlert(const std::string& costName, int64_t* alertBytes);
 
     /*
      * Attempt to find the bw_costly_* tables that need flushing,
