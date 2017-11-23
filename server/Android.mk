@@ -47,7 +47,6 @@ LOCAL_C_INCLUDES := \
         system/netd/include \
 
 LOCAL_CLANG := true
-LOCAL_SDCLANG := false
 LOCAL_CPPFLAGS := -Wall -Werror
 LOCAL_SANITIZE := unsigned-integer-overflow
 LOCAL_MODULE := netd
