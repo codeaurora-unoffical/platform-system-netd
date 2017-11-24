@@ -93,18 +93,20 @@ int netdClientConnect(int sockfd, const sockaddr* addr, socklen_t addrlen) {
             return -1;
         }
     }
-#ifdef USE_WRAPPER
-    if ( FwmarkClient::shouldSetFwmark(addr->sa_family)) {
-        if( __propClientDispatch.propConnect ) {
-            return __propClientDispatch.propConnect(sockfd, addr, addrlen);
-        } else {
-            return libcConnect(sockfd, addr, addrlen);
-        }
-    }
-#endif
     // Latency measurement does not include time of sending commands to Fwmark
     Stopwatch s;
-    const int ret = libcConnect(sockfd, addr, addrlen);
+    int ret = -1;
+
+#ifdef USE_WRAPPER
+    if (shouldSetFwmark && (__propClientDispatch.propConnect != nullptr)) {
+        ret = __propClientDispatch.propConnect(sockfd, addr, addrlen);
+    } else {
+        ret = libcConnect(sockfd, addr, addrlen);
+    }
+#else
+    ret = libcConnect(sockfd, addr, addrlen);
+#endif
+
     // Save errno so it isn't clobbered by sending ON_CONNECT_COMPLETE
     const int connectErrno = errno;
     const unsigned latencyMs = lround(s.timeTaken());
@@ -119,7 +121,6 @@ int netdClientConnect(int sockfd, const sockaddr* addr, socklen_t addrlen) {
     }
     errno = connectErrno;
     return ret;
-
 }
 
 int netdClientSocket(int domain, int type, int protocol) {
