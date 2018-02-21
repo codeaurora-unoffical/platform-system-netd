@@ -41,8 +41,6 @@ public:
     std::list<std::string> ifacePairList;
 
 private:
-    int natCount;
-
     static std::string makeTetherCountingRule(const char *if1, const char *if2);
     bool checkTetherCountingRuleExist(const std::string& pair_name);
 
@@ -55,6 +53,13 @@ private:
     friend class NatControllerTest;
     static int (*execFunction)(int, char **, int *, bool, bool);
     static int (*iptablesRestoreFunction)(IptablesTarget, const std::string&);
+
+    struct NatIfaceMap{
+        std::string iface;
+        int downstreamCount;
+    };
+
+    struct NatIfaceMap mNatIfaceMap = {};
 };
 
 #endif

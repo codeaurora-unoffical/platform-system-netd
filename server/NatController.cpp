@@ -129,8 +129,6 @@ int NatController::setDefaults() {
         return res;
     }
 
-    natCount = 0;
-
     return 0;
 }
 
@@ -149,8 +147,14 @@ int NatController::enableNat(const char* intIface, const char* extIface) {
         return -1;
     }
 
+    if (mNatIfaceMap.iface.compare(extIface)) {
+        mNatIfaceMap.iface = std::string(extIface);
+        mNatIfaceMap.downstreamCount = 0;
+        setDefaults();
+    }
+
     // add this if we are the first added nat
-    if (natCount == 0) {
+    if (mNatIfaceMap.downstreamCount == 0) {
         std::vector<std::string> v4Cmds = {
             "*nat",
             StringPrintf("-A %s -o %s -j MASQUERADE", LOCAL_NAT_POSTROUTING, extIface),
@@ -178,14 +182,14 @@ int NatController::enableNat(const char* intIface, const char* extIface) {
 
     if (setForwardRules(true, intIface, extIface) != 0) {
         ALOGE("Error setting forward rules");
-        if (natCount == 0) {
+        if (mNatIfaceMap.downstreamCount == 0) {
             setDefaults();
         }
         errno = ENODEV;
         return -1;
     }
 
-    natCount++;
+    mNatIfaceMap.downstreamCount++;
     return 0;
 }
 
@@ -272,8 +276,12 @@ int NatController::disableNat(const char* intIface, const char* extIface) {
         return -1;
     }
 
+    if (!mNatIfaceMap.iface.compare(extIface)) {
+        mNatIfaceMap.downstreamCount--;
+    }
+
     setForwardRules(false, intIface, extIface);
-    if (--natCount <= 0) {
+    if (mNatIfaceMap.downstreamCount <= 0) {
         // handle decrement to 0 case (do reset to defaults) and erroneous dec below 0
         setDefaults();
     }
