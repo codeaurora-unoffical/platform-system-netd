@@ -33,6 +33,7 @@
 #include <android-base/strings.h>
 
 #include <netdutils/MockSyscalls.h>
+#include "FirewallController.h"
 #include "TrafficController.h"
 #include "bpf/BpfUtils.h"
 
@@ -53,6 +54,8 @@ using netdutils::status::ok;
 
 constexpr int TEST_MAP_SIZE = 10;
 constexpr uid_t TEST_UID = 10086;
+constexpr uid_t TEST_UID2 = 54321;
+constexpr uid_t TEST_UID3 = 98765;
 constexpr uint32_t TEST_TAG = 42;
 constexpr int TEST_COUNTERSET = 1;
 constexpr int DEFAULT_COUNTERSET = 0;
@@ -70,8 +73,13 @@ class TrafficControllerTest : public ::testing::Test {
     unique_fd mFakeUidCounterSetMap;
     unique_fd mFakeUidStatsMap;
     unique_fd mFakeTagStatsMap;
+    unique_fd mFakeDozableUidMap;
+    unique_fd mFakeStandbyUidMap;
+    unique_fd mFakePowerSaveUidMap;
 
     void SetUp() {
+        std::lock_guard<std::mutex> ownerGuard(mTc.mOwnerMatchMutex);
+        std::lock_guard<std::mutex> statsGuard(mTc.mDeleteStatsMutex);
         SKIP_IF_BPF_NOT_SUPPORTED;
 
         mFakeCookieTagMap = unique_fd(createMap(BPF_MAP_TYPE_HASH, sizeof(uint64_t),
@@ -90,6 +98,17 @@ class TrafficControllerTest : public ::testing::Test {
                                                sizeof(struct StatsValue), TEST_MAP_SIZE, 0));
         ASSERT_LE(0, mFakeTagStatsMap);
 
+        mFakeDozableUidMap = unique_fd(
+            createMap(BPF_MAP_TYPE_HASH, sizeof(uint32_t), sizeof(uint32_t), TEST_MAP_SIZE, 0));
+        ASSERT_LE(0, mFakeDozableUidMap);
+
+        mFakeStandbyUidMap = unique_fd(
+            createMap(BPF_MAP_TYPE_HASH, sizeof(uint32_t), sizeof(uint32_t), TEST_MAP_SIZE, 0));
+        ASSERT_LE(0, mFakeStandbyUidMap);
+
+        mFakePowerSaveUidMap = unique_fd(
+            createMap(BPF_MAP_TYPE_HASH, sizeof(uint32_t), sizeof(uint32_t), TEST_MAP_SIZE, 0));
+        ASSERT_LE(0, mFakePowerSaveUidMap);
         // Make sure trafficController use the eBPF code path.
         mTc.ebpfSupported = true;
 
@@ -97,13 +116,16 @@ class TrafficControllerTest : public ::testing::Test {
         mTc.mUidCounterSetMap.reset(mFakeUidCounterSetMap);
         mTc.mUidStatsMap.reset(mFakeUidStatsMap);
         mTc.mTagStatsMap.reset(mFakeTagStatsMap);
+        mTc.mDozableUidMap.reset(mFakeDozableUidMap);
+        mTc.mStandbyUidMap.reset(mFakeStandbyUidMap);
+        mTc.mPowerSaveUidMap.reset(mFakePowerSaveUidMap);
     }
 
     int setUpSocketAndTag(int protocol, uint64_t* cookie, uint32_t tag, uid_t uid) {
         int sock = socket(protocol, SOCK_STREAM, 0);
         EXPECT_LE(0, sock);
         *cookie = getSocketCookie(sock);
-        EXPECT_NE(INET_DIAG_NOCOOKIE, *cookie);
+        EXPECT_NE(NONEXISTENT_COOKIE, *cookie);
         EXPECT_EQ(0, mTc.tagSocket(sock, tag, uid));
         return sock;
     }
@@ -121,7 +143,7 @@ class TrafficControllerTest : public ::testing::Test {
     }
 
     void expectTagMapEmpty() {
-        uint64_t invalidCookie = INET_DIAG_NOCOOKIE;
+        uint64_t invalidCookie = NONEXISTENT_COOKIE;
         uint64_t cookie;
         EXPECT_EQ(-1, getNextMapKey(mFakeCookieTagMap, &invalidCookie, &cookie));
     }
@@ -138,6 +160,62 @@ class TrafficControllerTest : public ::testing::Test {
         EXPECT_EQ(0, writeToMapEntry(mFakeUidStatsMap, key, &statsMapValue, BPF_ANY));
         // put tag information back to statsKey
         key->tag = tag;
+    }
+
+    void checkUidOwnerRuleForChain(ChildChain chain, const unique_fd& targetMap) {
+        uint32_t uid = TEST_UID;
+        EXPECT_EQ(0, mTc.changeUidOwnerRule(chain, uid, DENY, BLACKLIST));
+        uint8_t value;
+        EXPECT_EQ(0, findMapEntry(targetMap, &uid, &value));
+        EXPECT_EQ((uint8_t)BPF_DROP, value);
+
+        uid = TEST_UID2;
+        EXPECT_EQ(0, mTc.changeUidOwnerRule(chain, uid, ALLOW, WHITELIST));
+        EXPECT_EQ(0, findMapEntry(targetMap, &uid, &value));
+        EXPECT_EQ((uint8_t)BPF_PASS, value);
+
+        EXPECT_EQ(0, mTc.changeUidOwnerRule(chain, uid, DENY, WHITELIST));
+        EXPECT_EQ(-1, findMapEntry(targetMap, &uid, &value));
+        EXPECT_EQ(ENOENT, errno);
+
+        uid = TEST_UID;
+        EXPECT_EQ(0, mTc.changeUidOwnerRule(chain, uid, ALLOW, BLACKLIST));
+        EXPECT_EQ(-1, findMapEntry(targetMap, &uid, &value));
+        EXPECT_EQ(ENOENT, errno);
+
+        uid = TEST_UID3;
+        EXPECT_EQ(-ENOENT, mTc.changeUidOwnerRule(chain, uid, ALLOW, BLACKLIST));
+        EXPECT_EQ(-1, findMapEntry(targetMap, &uid, &value));
+        EXPECT_EQ(ENOENT, errno);
+    }
+
+    void checkEachUidValue(const std::vector<int32_t>& uids, const uint8_t expectValue,
+                           const unique_fd& targetMap) {
+        uint8_t value;
+        for (auto uid : uids) {
+            EXPECT_EQ(0, findMapEntry(targetMap, &uid, &value));
+            EXPECT_EQ((uint8_t)expectValue, value);
+        }
+        std::set<uint32_t> uidSet(uids.begin(), uids.end());
+        auto checkNoOtherUid = [&uidSet](void *key, const base::unique_fd&) {
+            int32_t uid = *(int32_t *)key;
+            EXPECT_NE(uidSet.end(), uidSet.find(uid));
+            return BPF_CONTINUE;
+        };
+        uint32_t nonExistentKey = NONEXISTENT_UID;
+        uint8_t dummyValue;
+        EXPECT_EQ(0, bpfIterateMap(nonExistentKey, dummyValue, targetMap, checkNoOtherUid));
+    }
+
+    void checkUidMapReplace(const std::string& name, const std::vector<int32_t>& uids,
+                            const unique_fd& targetMap) {
+        bool isWhitelist = true;
+        EXPECT_EQ(0, mTc.replaceUidOwnerMap(name, isWhitelist, uids));
+        checkEachUidValue(uids, BPF_PASS, targetMap);
+
+        isWhitelist = false;
+        EXPECT_EQ(0, mTc.replaceUidOwnerMap(name, isWhitelist, uids));
+        checkEachUidValue(uids, BPF_DROP, targetMap);
     }
 
     void TearDown() {
@@ -277,11 +355,6 @@ TEST_F(TrafficControllerTest, TestDeleteAllUidData) {
     StatsValue statsMapResult;
     ASSERT_EQ(-1, findMapEntry(mFakeTagStatsMap, &tagStatsMapKey, &statsMapResult));
     ASSERT_EQ(-1, findMapEntry(mFakeUidStatsMap, &tagStatsMapKey, &statsMapResult));
-    StatsKey removedStatsKey= {.uid = 0, .tag = 0, .counterSet = COUNTERSETS_LIMIT,
-      .ifaceIndex = 0};
-    ASSERT_EQ(0, findMapEntry(mFakeUidStatsMap, &removedStatsKey, &statsMapResult));
-    ASSERT_EQ((uint64_t)1, statsMapResult.rxPackets);
-    ASSERT_EQ((uint64_t)100, statsMapResult.rxBytes);
 }
 
 TEST_F(TrafficControllerTest, TestDeleteDataWithTwoTags) {
@@ -342,19 +415,59 @@ TEST_F(TrafficControllerTest, TestDeleteDataWithTwoUids) {
     ASSERT_EQ(0, findMapEntry(mFakeUidStatsMap, &tagStatsMapKey1, &statsMapResult));
     ASSERT_EQ((uint64_t)1, statsMapResult.rxPackets);
     ASSERT_EQ((uint64_t)100, statsMapResult.rxBytes);
-    StatsKey removedStatsKey= {.uid = 0, .tag = 0, .counterSet = COUNTERSETS_LIMIT,
-      .ifaceIndex = 0};
-    ASSERT_EQ(0, findMapEntry(mFakeUidStatsMap, &removedStatsKey, &statsMapResult));
-    ASSERT_EQ((uint64_t)1, statsMapResult.rxPackets);
-    ASSERT_EQ((uint64_t)100, statsMapResult.rxBytes);
 
-    // Delete the stats of the other uid. Check if it is properly added on the
-    // previous removedStats data.
+    // Delete the stats of the other uid.
     ASSERT_EQ(0, mTc.deleteTagData(0, uid1));
     ASSERT_EQ(-1, findMapEntry(mFakeUidStatsMap, &tagStatsMapKey1, &statsMapResult));
-    ASSERT_EQ(0, findMapEntry(mFakeUidStatsMap, &removedStatsKey, &statsMapResult));
-    ASSERT_EQ((uint64_t)2, statsMapResult.rxPackets);
-    ASSERT_EQ((uint64_t)200, statsMapResult.rxBytes);
+}
+
+TEST_F(TrafficControllerTest, TestUpdateOwnerMapEntry) {
+    SKIP_IF_BPF_NOT_SUPPORTED;
+
+    uint32_t uid = TEST_UID;
+    ASSERT_EQ(0, mTc.updateOwnerMapEntry(mFakeDozableUidMap, uid, DENY, BLACKLIST));
+    uint8_t value;
+    ASSERT_EQ(0, findMapEntry(mFakeDozableUidMap, &uid, &value));
+    ASSERT_EQ((uint8_t)BPF_DROP, value);
+
+    uid = TEST_UID2;
+    ASSERT_EQ(0, mTc.updateOwnerMapEntry(mFakeDozableUidMap, uid, ALLOW, WHITELIST));
+    ASSERT_EQ(0, findMapEntry(mFakeDozableUidMap, &uid, &value));
+    ASSERT_EQ((uint8_t)BPF_PASS, value);
+
+    ASSERT_EQ(0, mTc.updateOwnerMapEntry(mFakeDozableUidMap, uid, DENY, WHITELIST));
+    ASSERT_EQ(-1, findMapEntry(mFakeDozableUidMap, &uid, &value));
+    ASSERT_EQ(ENOENT, errno);
+
+    uid = TEST_UID;
+    ASSERT_EQ(0, mTc.updateOwnerMapEntry(mFakeDozableUidMap, uid, ALLOW, BLACKLIST));
+    ASSERT_EQ(-1, findMapEntry(mFakeDozableUidMap, &uid, &value));
+    ASSERT_EQ(ENOENT, errno);
+
+    uid = TEST_UID3;
+    ASSERT_EQ(-ENOENT, mTc.updateOwnerMapEntry(mFakeDozableUidMap, uid, ALLOW, BLACKLIST));
+    ASSERT_EQ(-1, findMapEntry(mFakeDozableUidMap, &uid, &value));
+    ASSERT_EQ(ENOENT, errno);
+}
+
+TEST_F(TrafficControllerTest, TestChangeUidOwnerRule) {
+    SKIP_IF_BPF_NOT_SUPPORTED;
+
+    checkUidOwnerRuleForChain(DOZABLE, mFakeDozableUidMap);
+    checkUidOwnerRuleForChain(STANDBY, mFakeStandbyUidMap);
+    checkUidOwnerRuleForChain(POWERSAVE, mFakePowerSaveUidMap);
+    ASSERT_EQ(-EINVAL, mTc.changeUidOwnerRule(NONE, TEST_UID, ALLOW, WHITELIST));
+    ASSERT_EQ(-EINVAL, mTc.changeUidOwnerRule(INVALID_CHAIN, TEST_UID, ALLOW, WHITELIST));
+}
+
+TEST_F(TrafficControllerTest, TestReplaceUidOwnerMap) {
+    SKIP_IF_BPF_NOT_SUPPORTED;
+
+    std::vector<int32_t> uids = {TEST_UID, TEST_UID2, TEST_UID3};
+    checkUidMapReplace("fw_dozable", uids, mFakeDozableUidMap);
+    checkUidMapReplace("fw_standby", uids, mFakeStandbyUidMap);
+    checkUidMapReplace("fw_powersave", uids, mFakePowerSaveUidMap);
+    ASSERT_EQ(-EINVAL, mTc.replaceUidOwnerMap("unknow", true, uids));
 }
 
 }  // namespace net
