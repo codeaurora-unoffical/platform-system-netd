@@ -37,17 +37,21 @@
 #include <android-base/macros.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <bpf/BpfUtils.h>
 #include <cutils/multiuser.h>
 #include <gtest/gtest.h>
 #include <logwrap/logwrap.h>
 #include <netutils/ifc.h>
 
+#include "InterfaceController.h"
 #include "NetdConstants.h"
 #include "Stopwatch.h"
+#include "XfrmController.h"
 #include "tun_interface.h"
 #include "android/net/INetd.h"
 #include "android/net/UidRange.h"
 #include "binder/IServiceManager.h"
+#include "netdutils/Syscalls.h"
 
 #define IP_PATH "/system/bin/ip"
 #define IP6TABLES_PATH "/system/bin/ip6tables"
@@ -58,10 +62,18 @@ using namespace android;
 using namespace android::base;
 using namespace android::binder;
 using android::base::StartsWith;
+using android::bpf::hasBpfSupport;
 using android::net::INetd;
 using android::net::TunInterface;
 using android::net::UidRange;
+using android::net::XfrmController;
+using android::netdutils::sSyscalls;
 using android::os::PersistableBundle;
+
+#define SKIP_IF_BPF_SUPPORTED         \
+    do {                              \
+        if (hasBpfSupport()) return;  \
+    } while (0);
 
 static const char* IP_RULE_V4 = "-4";
 static const char* IP_RULE_V6 = "-6";
@@ -91,6 +103,8 @@ public:
         mNetd->networkDestroy(TEST_NETID1);
         mNetd->networkDestroy(TEST_NETID2);
     }
+
+    bool allocateIpSecResources(bool expectOk, int32_t *spi);
 
     // Static because setting up the tun interface takes about 40ms.
     static void SetUpTestCase() {
@@ -193,6 +207,8 @@ static bool iptablesEspAllowRuleExists(const char *chainName){
 }
 
 TEST_F(BinderTest, TestFirewallReplaceUidChain) {
+    SKIP_IF_BPF_SUPPORTED;
+
     std::string chainName = StringPrintf("netd_binder_test_%u", arc4random_uniform(10000));
     const int kNumUids = 500;
     std::vector<int32_t> noUids(0);
@@ -252,18 +268,18 @@ TEST_F(BinderTest, TestVirtualTunnelInterface) {
         int32_t iKey;
         int32_t oKey;
     } kTestData[] = {
-        { "IPV4", "test_vti", "127.0.0.1", "8.8.8.8", 0x1234 + 53, 0x1234 + 53 },
-        { "IPV6", "test_vti6", "::1", "2001:4860:4860::8888", 0x1234 + 50, 0x1234 + 50 },
+        {"IPV4", "test_vti", "127.0.0.1", "8.8.8.8", 0x1234 + 53, 0x1234 + 53},
+        {"IPV6", "test_vti6", "::1", "2001:4860:4860::8888", 0x1234 + 50, 0x1234 + 50},
     };
 
     for (unsigned int i = 0; i < arraysize(kTestData); i++) {
-        const auto &td = kTestData[i];
+        const auto& td = kTestData[i];
 
         binder::Status status;
 
         // Create Virtual Tunnel Interface.
-        status = mNetd->addVirtualTunnelInterface(td.deviceName, td.localAddress,
-                                                  td.remoteAddress, td.iKey, td.oKey);
+        status = mNetd->addVirtualTunnelInterface(td.deviceName, td.localAddress, td.remoteAddress,
+                                                  td.iKey, td.oKey);
         EXPECT_TRUE(status.isOk()) << td.family << status.exceptionMessage();
 
         // Update Virtual Tunnel Interface.
@@ -276,6 +292,67 @@ TEST_F(BinderTest, TestVirtualTunnelInterface) {
         EXPECT_TRUE(status.isOk()) << td.family << status.exceptionMessage();
     }
 }
+
+// IPsec tests are not run in 32 bit mode; both 32-bit kernels and
+// mismatched ABIs (64-bit kernel with 32-bit userspace) are unsupported.
+#if INTPTR_MAX != INT32_MAX
+#define RETURN_FALSE_IF_NEQ(_expect_, _ret_) \
+        do { if ((_expect_) != (_ret_)) return false; } while(false)
+bool BinderTest::allocateIpSecResources(bool expectOk, int32_t *spi) {
+    netdutils::Status status = XfrmController::ipSecAllocateSpi(0, "::", "::1", 123, spi);
+    SCOPED_TRACE(status);
+    RETURN_FALSE_IF_NEQ(status.ok(), expectOk);
+
+    // Add a policy
+    status = XfrmController::ipSecAddSecurityPolicy(0, 0, "::", "::1", 123, 0, 0);
+    SCOPED_TRACE(status);
+    RETURN_FALSE_IF_NEQ(status.ok(), expectOk);
+
+    // Add an ipsec interface
+    status = netdutils::statusFromErrno(
+            XfrmController::addVirtualTunnelInterface(
+                    "ipsec_test", "::", "::1", 0xF00D, 0xD00D, false),
+            "addVirtualTunnelInterface");
+    return (status.ok() == expectOk);
+}
+
+TEST_F(BinderTest, TestXfrmControllerInit) {
+    netdutils::Status status;
+    status = XfrmController::Init();
+    SCOPED_TRACE(status);
+
+    // Older devices or devices with mismatched Kernel/User ABI cannot support the IPsec
+    // feature.
+    if (status.code() == EOPNOTSUPP) return;
+
+    ASSERT_TRUE(status.ok());
+
+    int32_t spi = 0;
+
+    ASSERT_TRUE(allocateIpSecResources(true, &spi));
+    ASSERT_TRUE(allocateIpSecResources(false, &spi));
+
+    status = XfrmController::Init();
+    ASSERT_TRUE(status.ok());
+    ASSERT_TRUE(allocateIpSecResources(true, &spi));
+
+    // Clean up
+    status = XfrmController::ipSecDeleteSecurityAssociation(0, "::", "::1", 123, spi, 0);
+    SCOPED_TRACE(status);
+    ASSERT_TRUE(status.ok());
+
+    status = XfrmController::ipSecDeleteSecurityPolicy(0, 0, "::", "::1", 0, 0);
+    SCOPED_TRACE(status);
+    ASSERT_TRUE(status.ok());
+
+    // Remove Virtual Tunnel Interface.
+    status = netdutils::statusFromErrno(
+            XfrmController::removeVirtualTunnelInterface("ipsec_test"),
+            "removeVirtualTunnelInterface");
+
+    ASSERT_TRUE(status.ok());
+}
+#endif
 
 static int bandwidthDataSaverEnabled(const char *binary) {
     std::vector<std::string> lines = listIptablesRule(binary, "bw_data_saver");

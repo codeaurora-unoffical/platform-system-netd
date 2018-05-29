@@ -39,14 +39,17 @@
 #include <sys/wait.h>
 
 #include <linux/in.h>
+#include <linux/ipsec.h>
 #include <linux/netlink.h>
 #include <linux/xfrm.h>
 
+#define LOG_TAG "XfrmController"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 #include "android-base/unique_fd.h"
+#include <android/net/INetd.h>
 #include <log/log_properties.h>
-#define LOG_TAG "XfrmController"
+#include "InterfaceController.h"
 #include "NetdConstants.h"
 #include "NetlinkCommands.h"
 #include "ResponseCode.h"
@@ -58,6 +61,7 @@
 #include <cutils/properties.h>
 #include <logwrap/logwrap.h>
 
+using android::net::INetd;
 using android::netdutils::Fd;
 using android::netdutils::Slice;
 using android::netdutils::Status;
@@ -369,6 +373,46 @@ private:
 //
 //
 XfrmController::XfrmController(void) {}
+
+netdutils::Status XfrmController::Init() {
+    RETURN_IF_NOT_OK(flushInterfaces());
+    XfrmSocketImpl sock;
+    RETURN_IF_NOT_OK(sock.open());
+    RETURN_IF_NOT_OK(flushSaDb(sock));
+    return flushPolicyDb(sock);
+}
+
+netdutils::Status XfrmController::flushInterfaces() {
+    const auto& ifaces = InterfaceController::getIfaceNames();
+    RETURN_IF_NOT_OK(ifaces);
+    const String8 ifPrefix8 = String8(INetd::IPSEC_INTERFACE_PREFIX().string());
+
+    for (const std::string& iface : ifaces.value()) {
+        int status = 0;
+        // Look for the reserved interface prefix, which must be in the name at position 0
+        if (!iface.compare(0, ifPrefix8.length(), ifPrefix8.c_str()) &&
+            (status = removeVirtualTunnelInterface(iface)) < 0) {
+            ALOGE("Failed to delete ipsec tunnel %s.", iface.c_str());
+            return netdutils::statusFromErrno(status, "Failed to remove ipsec tunnel.");
+        }
+    }
+    return netdutils::status::ok;
+}
+
+netdutils::Status XfrmController::flushSaDb(const XfrmSocket& s) {
+    struct xfrm_usersa_flush flushUserSa = {.proto = IPSEC_PROTO_ANY};
+
+    std::vector<iovec> iov = {{NULL, 0}, // reserved for the eventual addition of a NLMSG_HDR
+                              {&flushUserSa, sizeof(flushUserSa)}, // xfrm_usersa_flush structure
+                              {kPadBytes, NLMSG_ALIGN(sizeof(flushUserSa)) - sizeof(flushUserSa)}};
+
+    return s.sendMessage(XFRM_MSG_FLUSHSA, NETLINK_REQUEST_FLAGS, 0, &iov);
+}
+
+netdutils::Status XfrmController::flushPolicyDb(const XfrmSocket& s) {
+    std::vector<iovec> iov = {{NULL, 0}}; // reserved for the eventual addition of a NLMSG_HDR
+    return s.sendMessage(XFRM_MSG_FLUSHPOLICY, NETLINK_REQUEST_FLAGS, 0, &iov);
+}
 
 netdutils::Status XfrmController::ipSecSetEncapSocketOwner(const android::base::unique_fd& socket,
                                                            int newUid, uid_t callerUid) {
@@ -1302,7 +1346,8 @@ int XfrmController::addVirtualTunnelInterface(const std::string& deviceName,
         flags |= NLM_F_EXCL | NLM_F_CREATE;
     }
 
-    int ret = sendNetlinkRequest(action, flags, iov, ARRAY_SIZE(iov), nullptr);
+    // sendNetlinkRequest returns -errno
+    int ret = -1 * sendNetlinkRequest(action, flags, iov, ARRAY_SIZE(iov), nullptr);
     if (ret) {
         ALOGE("Error in %s virtual tunnel interface. Error Code: %d",
               isUpdate ? "updating" : "adding", ret);
@@ -1339,7 +1384,8 @@ int XfrmController::removeVirtualTunnelInterface(const std::string& deviceName) 
     uint16_t action = RTM_DELLINK;
     uint16_t flags = NLM_F_REQUEST | NLM_F_ACK;
 
-    int ret = sendNetlinkRequest(action, flags, iov, ARRAY_SIZE(iov), nullptr);
+    // sendNetlinkRequest returns -errno
+    int ret = -1 * sendNetlinkRequest(action, flags, iov, ARRAY_SIZE(iov), nullptr);
     if (ret) {
         ALOGE("Error in removing virtual tunnel interface %s. Error Code: %d", iflaIfNameStrValue,
               ret);
