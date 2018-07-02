@@ -24,7 +24,7 @@ LOCAL_CFLAGS := -Wall -Werror -Wunused-parameter
 LOCAL_CFLAGS += -Wno-varargs
 
 EXTRA_LDLIBS := -lpthread
-LOCAL_SHARED_LIBRARIES += libbase libbinder libcrypto libcutils liblog \
+LOCAL_SHARED_LIBRARIES += libbase libbinder libbpf libcrypto libcutils liblog \
                           libnetd_client libnetutils libssl libutils
 LOCAL_STATIC_LIBRARIES += libnetd_test_dnsresponder liblogwrap libnetdaidl_static \
                           libnetdutils libnetd_test_tun_interface libbpf
@@ -54,6 +54,9 @@ LOCAL_SRC_FILES := binder_test.cpp \
                    ../server/NetlinkCommands.cpp \
                    ../server/XfrmController.cpp
 LOCAL_MODULE_TAGS := eng tests
+LOCAL_MULTILIB := both
+LOCAL_MODULE_STEM_32 := $(LOCAL_MODULE)32
+LOCAL_MODULE_STEM_64 := $(LOCAL_MODULE)64
 include $(BUILD_NATIVE_TEST)
 
 include $(call all-makefiles-under, $(LOCAL_PATH))
