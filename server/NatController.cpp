@@ -214,6 +214,12 @@ int NatController::setForwardRules(bool add, const char *intIface, const char *e
     }
 
     std::vector<std::string> v4 = {
+        "*raw",
+        StringPrintf("%s %s -p tcp --dport 21 -i %s -j CT --helper ftp",
+                     op, LOCAL_RAW_PREROUTING, intIface),
+        StringPrintf("%s %s -p tcp --dport 1723 -i %s -j CT --helper pptp",
+                     op, LOCAL_RAW_PREROUTING, intIface),
+        "COMMIT",
         "*filter",
         StringPrintf("%s %s -i %s -o %s -m state --state ESTABLISHED,RELATED -g %s",
                      op, LOCAL_FORWARD, extIface, intIface, LOCAL_TETHER_COUNTERS_CHAIN),
