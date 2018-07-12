@@ -115,7 +115,7 @@ protected:
                          intIf),
             StringPrintf("-A tetherctrl_raw_PREROUTING -p tcp --dport 1723 -i %s -j CT --helper pptp",
                          intIf),
-            "COMMIT"
+            "COMMIT",
             "*filter",
             StringPrintf("-A natctrl_FORWARD -i %s -o %s -m state --state"
                          " ESTABLISHED,RELATED -g natctrl_tether_counters", extIf, intIf),
