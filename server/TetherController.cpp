@@ -167,6 +167,8 @@ size_t TetherController::forwardingRequestCount() {
     return mForwardingRequests.size();
 }
 
+#define TETHER_START_CONST_ARG        11
+
 int TetherController::startTethering(int num_addrs, char **dhcp_ranges) {
     if (mDaemonPid != 0) {
         ALOGE("Tethering already started");
