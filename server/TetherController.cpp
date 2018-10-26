@@ -139,7 +139,7 @@ size_t TetherController::forwardingRequestCount() {
     return mForwardingRequests.size();
 }
 
-#define TETHER_START_CONST_ARG        11
+#define TETHER_START_CONST_ARG        15
 
 int TetherController::startTethering(int num_addrs, char **dhcp_ranges) {
     if (mDaemonPid != 0) {
@@ -198,10 +198,14 @@ int TetherController::startTethering(int num_addrs, char **dhcp_ranges) {
         // TODO: pipe through metered status from ConnService
         args[5] = (char *)"--dhcp-option-force=43,ANDROID_METERED";
         args[6] = (char *)"--pid-file";
-        args[7] = (char *)"--dhcp-ignore-names";
-        args[8] = (char *)"--listen-mark";
-        args[9] = (char *)markStr;
-        args[10] = (char *)"";
+        args[7] = (char *)"--dhcp-host=wpad,set:Blacklist";
+        args[8] = (char *)"--dhcp-host=isatap,set:Blacklist";
+        args[9] = (char *)"--dhcp-host=autodiscovery,set:Blacklist";
+        args[10] = (char *)"--dhcp-host=autoreconf,set:Blacklist";
+        args[11] = (char *)"--dhcp-ignore-names=tag:Blacklist";
+        args[12] = (char *)"--listen-mark";
+        args[13] = (char *)markStr;
+        args[14] = (char *)"";
 
         int nextArg = TETHER_START_CONST_ARG;
         for (int addrIndex = 0; addrIndex < num_addrs; addrIndex += 2) {
