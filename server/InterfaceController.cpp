@@ -26,6 +26,7 @@
 #include <android-base/file.h>
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
+#include <android-base/strings.h>
 #include <log/log.h>
 #include <logwrap/logwrap.h>
 #include <netutils/ifc.h>
@@ -40,17 +41,18 @@
 
 using android::base::ReadFileToString;
 using android::base::StringPrintf;
+using android::base::Trim;
 using android::base::WriteStringToFile;
 using android::net::INetd;
 using android::net::RouteController;
 using android::netdutils::isOk;
-using android::netdutils::Status;
-using android::netdutils::StatusOr;
 using android::netdutils::makeSlice;
 using android::netdutils::sSyscalls;
-using android::netdutils::status::ok;
+using android::netdutils::Status;
 using android::netdutils::statusFromErrno;
+using android::netdutils::StatusOr;
 using android::netdutils::toString;
+using android::netdutils::status::ok;
 
 namespace {
 
@@ -189,6 +191,9 @@ Status setProperty(const std::string& key, const std::string& val) {
 
 
 }  // namespace
+
+namespace android {
+namespace net {
 
 android::netdutils::Status InterfaceController::enableStablePrivacyAddresses(
         const std::string& iface,
@@ -380,7 +385,11 @@ int InterfaceController::getParameter(
     if (path.empty()) {
         return -errno;
     }
-    return ReadFileToString(path, value) ? 0 : -errno;
+    if (ReadFileToString(path, value)) {
+        *value = Trim(*value);
+        return 0;
+    }
+    return -errno;
 }
 
 int InterfaceController::setParameter(
@@ -433,3 +442,6 @@ StatusOr<std::map<std::string, uint32_t>> InterfaceController::getIfaceList() {
     }
     return ifacePairs;
 }
+
+}  // namespace net
+}  // namespace android

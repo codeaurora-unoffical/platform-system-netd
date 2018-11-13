@@ -34,6 +34,7 @@
 #include <linux/if_tun.h>
 #include <openssl/base64.h>
 
+#include <android-base/file.h>
 #include <android-base/macros.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
@@ -59,23 +60,32 @@
 #define TUN_DEV "/dev/tun"
 #define RAW_TABLE "raw"
 #define MANGLE_TABLE "mangle"
+#define FILTER_TABLE "filter"
 
-using namespace android;
-using namespace android::base;
-using namespace android::binder;
+namespace binder = android::binder;
+namespace netdutils = android::netdutils;
+
+using android::IBinder;
+using android::IServiceManager;
+using android::sp;
+using android::String16;
+using android::String8;
+using android::base::Join;
+using android::base::ReadFileToString;
 using android::base::StartsWith;
+using android::base::StringPrintf;
+using android::base::Trim;
 using android::bpf::hasBpfSupport;
 using android::net::INetd;
 using android::net::TunInterface;
 using android::net::UidRange;
 using android::net::XfrmController;
-using android::netdutils::sSyscalls;
 using android::os::PersistableBundle;
 
-#define SKIP_IF_BPF_SUPPORTED         \
-    do {                              \
-        if (hasBpfSupport()) return;  \
-    } while (0);
+#define SKIP_IF_BPF_SUPPORTED        \
+    do {                             \
+        if (hasBpfSupport()) return; \
+    } while (0)
 
 static const char* IP_RULE_V4 = "-4";
 static const char* IP_RULE_V6 = "-6";
@@ -87,13 +97,12 @@ static const std::string NO_SOCKET_ALLOW_RULE("! owner UID match 0-4294967294");
 static const std::string ESP_ALLOW_RULE("esp");
 
 class BinderTest : public ::testing::Test {
-
-public:
+  public:
     BinderTest() {
-        sp<IServiceManager> sm = defaultServiceManager();
+        sp<IServiceManager> sm = android::defaultServiceManager();
         sp<IBinder> binder = sm->getService(String16("netd"));
         if (binder != nullptr) {
-            mNetd = interface_cast<INetd>(binder);
+            mNetd = android::interface_cast<INetd>(binder);
         }
     }
 
@@ -121,7 +130,7 @@ public:
 
     static void fakeRemoteSocketPair(int *clientSocket, int *serverSocket, int *acceptedSocket);
 
-protected:
+  protected:
     sp<INetd> mNetd;
     static TunInterface sTun;
 };
@@ -129,17 +138,17 @@ protected:
 TunInterface BinderTest::sTun;
 
 class TimedOperation : public Stopwatch {
-public:
+  public:
     explicit TimedOperation(const std::string &name): mName(name) {}
     virtual ~TimedOperation() {
         fprintf(stderr, "    %s: %6.1f ms\n", mName.c_str(), timeTaken());
     }
 
-private:
+  private:
     std::string mName;
 };
 
-TEST_F(BinderTest, TestIsAlive) {
+TEST_F(BinderTest, IsAlive) {
     TimedOperation t("isAlive RPC");
     bool isAlive = false;
     mNetd->isAlive(&isAlive);
@@ -207,7 +216,7 @@ static bool iptablesEspAllowRuleExists(const char *chainName){
            iptablesRuleExists(IP6TABLES_PATH, chainName, ESP_ALLOW_RULE);
 }
 
-TEST_F(BinderTest, TestFirewallReplaceUidChain) {
+TEST_F(BinderTest, FirewallReplaceUidChain) {
     SKIP_IF_BPF_SUPPORTED;
 
     std::string chainName = StringPrintf("netd_binder_test_%u", arc4random_uniform(10000));
@@ -260,7 +269,7 @@ TEST_F(BinderTest, TestFirewallReplaceUidChain) {
     EXPECT_EQ(false, ret);
 }
 
-TEST_F(BinderTest, TestVirtualTunnelInterface) {
+TEST_F(BinderTest, VirtualTunnelInterface) {
     const struct TestData {
         const std::string family;
         const std::string deviceName;
@@ -297,6 +306,10 @@ TEST_F(BinderTest, TestVirtualTunnelInterface) {
 // IPsec tests are not run in 32 bit mode; both 32-bit kernels and
 // mismatched ABIs (64-bit kernel with 32-bit userspace) are unsupported.
 #if INTPTR_MAX != INT32_MAX
+static const int XFRM_DIRECTIONS[] = {static_cast<int>(android::net::XfrmDirection::IN),
+                                      static_cast<int>(android::net::XfrmDirection::OUT)};
+static const int ADDRESS_FAMILIES[] = {AF_INET, AF_INET6};
+
 #define RETURN_FALSE_IF_NEQ(_expect_, _ret_) \
         do { if ((_expect_) != (_ret_)) return false; } while(false)
 bool BinderTest::allocateIpSecResources(bool expectOk, int32_t *spi) {
@@ -305,7 +318,7 @@ bool BinderTest::allocateIpSecResources(bool expectOk, int32_t *spi) {
     RETURN_FALSE_IF_NEQ(status.ok(), expectOk);
 
     // Add a policy
-    status = XfrmController::ipSecAddSecurityPolicy(0, 0, "::", "::1", 123, 0, 0);
+    status = XfrmController::ipSecAddSecurityPolicy(0, AF_INET6, 0, "::", "::1", 123, 0, 0);
     SCOPED_TRACE(status);
     RETURN_FALSE_IF_NEQ(status.ok(), expectOk);
 
@@ -317,7 +330,55 @@ bool BinderTest::allocateIpSecResources(bool expectOk, int32_t *spi) {
     return (status.ok() == expectOk);
 }
 
-TEST_F(BinderTest, TestXfrmControllerInit) {
+TEST_F(BinderTest, XfrmDualSelectorTunnelModePoliciesV4) {
+    binder::Status status;
+
+    // Repeat to ensure cleanup and recreation works correctly
+    for (int i = 0; i < 2; i++) {
+        for (int direction : XFRM_DIRECTIONS) {
+            for (int addrFamily : ADDRESS_FAMILIES) {
+                status = mNetd->ipSecAddSecurityPolicy(0, addrFamily, direction, "127.0.0.5",
+                                                       "127.0.0.6", 123, 0, 0);
+                EXPECT_TRUE(status.isOk())
+                        << " family: " << addrFamily << " direction: " << direction;
+            }
+        }
+
+        // Cleanup
+        for (int direction : XFRM_DIRECTIONS) {
+            for (int addrFamily : ADDRESS_FAMILIES) {
+                status = mNetd->ipSecDeleteSecurityPolicy(0, addrFamily, direction, 0, 0);
+                EXPECT_TRUE(status.isOk());
+            }
+        }
+    }
+}
+
+TEST_F(BinderTest, XfrmDualSelectorTunnelModePoliciesV6) {
+    binder::Status status;
+
+    // Repeat to ensure cleanup and recreation works correctly
+    for (int i = 0; i < 2; i++) {
+        for (int direction : XFRM_DIRECTIONS) {
+            for (int addrFamily : ADDRESS_FAMILIES) {
+                status = mNetd->ipSecAddSecurityPolicy(0, addrFamily, direction, "2001:db8::f00d",
+                                                       "2001:db8::d00d", 123, 0, 0);
+                EXPECT_TRUE(status.isOk())
+                        << " family: " << addrFamily << " direction: " << direction;
+            }
+        }
+
+        // Cleanup
+        for (int direction : XFRM_DIRECTIONS) {
+            for (int addrFamily : ADDRESS_FAMILIES) {
+                status = mNetd->ipSecDeleteSecurityPolicy(0, addrFamily, direction, 0, 0);
+                EXPECT_TRUE(status.isOk());
+            }
+        }
+    }
+}
+
+TEST_F(BinderTest, XfrmControllerInit) {
     netdutils::Status status;
     status = XfrmController::Init();
     SCOPED_TRACE(status);
@@ -342,7 +403,7 @@ TEST_F(BinderTest, TestXfrmControllerInit) {
     SCOPED_TRACE(status);
     ASSERT_TRUE(status.ok());
 
-    status = XfrmController::ipSecDeleteSecurityPolicy(0, 0, "::", "::1", 0, 0);
+    status = XfrmController::ipSecDeleteSecurityPolicy(0, AF_INET6, 0, 0, 0);
     SCOPED_TRACE(status);
     ASSERT_TRUE(status.ok());
 
@@ -407,7 +468,7 @@ int getDataSaverState() {
     return enabled6;
 }
 
-TEST_F(BinderTest, TestBandwidthEnableDataSaver) {
+TEST_F(BinderTest, BandwidthEnableDataSaver) {
     const int wasEnabled = getDataSaverState();
     ASSERT_NE(-1, wasEnabled);
 
@@ -456,7 +517,7 @@ static bool ipRuleExistsForRange(const uint32_t priority, const UidRange& range,
     return existsIp4;
 }
 
-TEST_F(BinderTest, TestNetworkInterfaces) {
+TEST_F(BinderTest, NetworkInterfaces) {
     EXPECT_TRUE(mNetd->networkCreatePhysical(TEST_NETID1, "").isOk());
     EXPECT_EQ(EEXIST, mNetd->networkCreatePhysical(TEST_NETID1, "").serviceSpecificErrorCode());
     EXPECT_EQ(EEXIST, mNetd->networkCreateVpn(TEST_NETID1, false, true).serviceSpecificErrorCode());
@@ -471,7 +532,7 @@ TEST_F(BinderTest, TestNetworkInterfaces) {
     EXPECT_TRUE(mNetd->networkDestroy(TEST_NETID2).isOk());
 }
 
-TEST_F(BinderTest, TestNetworkUidRules) {
+TEST_F(BinderTest, NetworkUidRules) {
     const uint32_t RULE_PRIORITY_SECURE_VPN = 12000;
 
     EXPECT_TRUE(mNetd->networkCreateVpn(TEST_NETID1, false, true).isOk());
@@ -500,7 +561,7 @@ TEST_F(BinderTest, TestNetworkUidRules) {
     EXPECT_EQ(ENONET, mNetd->networkDestroy(TEST_NETID1).serviceSpecificErrorCode());
 }
 
-TEST_F(BinderTest, TestNetworkRejectNonSecureVpn) {
+TEST_F(BinderTest, NetworkRejectNonSecureVpn) {
     constexpr uint32_t RULE_PRIORITY = 12500;
 
     std::vector<UidRange> uidRanges = {
@@ -580,7 +641,7 @@ void checkSocketpairClosed(int clientSocket, int acceptedSocket) {
     EXPECT_EQ(ECONNRESET, err);
 }
 
-TEST_F(BinderTest, TestSocketDestroy) {
+TEST_F(BinderTest, SocketDestroy) {
     int clientSocket, serverSocket, acceptedSocket;
     ASSERT_NO_FATAL_FAILURE(fakeRemoteSocketPair(&clientSocket, &serverSocket, &acceptedSocket));
 
@@ -663,7 +724,6 @@ int netmaskToPrefixLength(const T *p) {
 static bool interfaceHasAddress(
         const std::string &ifname, const char *addrString, int prefixLength) {
     struct addrinfo *addrinfoList = nullptr;
-    ScopedAddrinfo addrinfoCleanup(addrinfoList);
 
     const struct addrinfo hints = {
         .ai_flags    = AI_NUMERICHOST,
@@ -674,6 +734,7 @@ static bool interfaceHasAddress(
         addrinfoList == nullptr || addrinfoList->ai_addr == nullptr) {
         return false;
     }
+    ScopedAddrinfo addrinfoCleanup(addrinfoList);
 
     struct ifaddrs *ifaddrsList = nullptr;
     ScopedIfaddrs ifaddrsCleanup(ifaddrsList);
@@ -730,7 +791,7 @@ static bool interfaceHasAddress(
 
 }  // namespace
 
-TEST_F(BinderTest, TestInterfaceAddRemoveAddress) {
+TEST_F(BinderTest, InterfaceAddRemoveAddress) {
     static const struct TestData {
         const char *addrString;
         const int   prefixLength;
@@ -782,30 +843,68 @@ TEST_F(BinderTest, TestInterfaceAddRemoveAddress) {
     }
 }
 
-TEST_F(BinderTest, TestSetProcSysNet) {
-    static const struct TestData {
-        const int family;
+TEST_F(BinderTest, GetProcSysNet) {
+    const char LOOPBACK[] = "lo";
+    static const struct {
+        const int ipversion;
         const int which;
-        const char *ifname;
-        const char *parameter;
-        const char *value;
+        const char* ifname;
+        const char* parameter;
+        const char* expectedValue;
         const int expectedReturnCode;
     } kTestData[] = {
-        { INetd::IPV4, INetd::CONF, sTun.name().c_str(), "arp_ignore", "1", 0 },
-        { -1, INetd::CONF, sTun.name().c_str(), "arp_ignore", "1", EAFNOSUPPORT },
-        { INetd::IPV4, -1, sTun.name().c_str(), "arp_ignore", "1", EINVAL },
-        { INetd::IPV4, INetd::CONF, "..", "conf/lo/arp_ignore", "1", EINVAL },
-        { INetd::IPV4, INetd::CONF, ".", "lo/arp_ignore", "1", EINVAL },
-        { INetd::IPV4, INetd::CONF, sTun.name().c_str(), "../all/arp_ignore", "1", EINVAL },
-        { INetd::IPV6, INetd::NEIGH, sTun.name().c_str(), "ucast_solicit", "7", 0 },
+            {INetd::IPV4, INetd::CONF, LOOPBACK, "arp_ignore", "0", 0},
+            {-1, INetd::CONF, sTun.name().c_str(), "arp_ignore", nullptr, EAFNOSUPPORT},
+            {INetd::IPV4, -1, sTun.name().c_str(), "arp_ignore", nullptr, EINVAL},
+            {INetd::IPV4, INetd::CONF, "..", "conf/lo/arp_ignore", nullptr, EINVAL},
+            {INetd::IPV4, INetd::CONF, ".", "lo/arp_ignore", nullptr, EINVAL},
+            {INetd::IPV4, INetd::CONF, sTun.name().c_str(), "../all/arp_ignore", nullptr, EINVAL},
+            {INetd::IPV6, INetd::NEIGH, LOOPBACK, "ucast_solicit", "3", 0},
     };
 
-    for (unsigned int i = 0; i < arraysize(kTestData); i++) {
-        const auto &td = kTestData[i];
+    for (int i = 0; i < arraysize(kTestData); i++) {
+        const auto& td = kTestData[i];
 
-        const binder::Status status = mNetd->setProcSysNet(
-                    td.family, td.which, td.ifname, td.parameter,
-                    td.value);
+        std::string value;
+        const binder::Status status =
+                mNetd->getProcSysNet(td.ipversion, td.which, td.ifname, td.parameter, &value);
+
+        if (td.expectedReturnCode == 0) {
+            SCOPED_TRACE(String8::format("test case %d should have passed", i));
+            EXPECT_EQ(0, status.exceptionCode());
+            EXPECT_EQ(0, status.serviceSpecificErrorCode());
+            EXPECT_EQ(td.expectedValue, value);
+        } else {
+            SCOPED_TRACE(String8::format("test case %d should have failed", i));
+            EXPECT_EQ(binder::Status::EX_SERVICE_SPECIFIC, status.exceptionCode());
+            EXPECT_EQ(td.expectedReturnCode, status.serviceSpecificErrorCode());
+        }
+    }
+}
+
+TEST_F(BinderTest, SetProcSysNet) {
+    static const struct {
+        const int ipversion;
+        const int which;
+        const char* ifname;
+        const char* parameter;
+        const char* value;
+        const int expectedReturnCode;
+    } kTestData[] = {
+            {INetd::IPV4, INetd::CONF, sTun.name().c_str(), "arp_ignore", "1", 0},
+            {-1, INetd::CONF, sTun.name().c_str(), "arp_ignore", "1", EAFNOSUPPORT},
+            {INetd::IPV4, -1, sTun.name().c_str(), "arp_ignore", "1", EINVAL},
+            {INetd::IPV4, INetd::CONF, "..", "conf/lo/arp_ignore", "1", EINVAL},
+            {INetd::IPV4, INetd::CONF, ".", "lo/arp_ignore", "1", EINVAL},
+            {INetd::IPV4, INetd::CONF, sTun.name().c_str(), "../all/arp_ignore", "1", EINVAL},
+            {INetd::IPV6, INetd::NEIGH, sTun.name().c_str(), "ucast_solicit", "7", 0},
+    };
+
+    for (int i = 0; i < arraysize(kTestData); i++) {
+        const auto& td = kTestData[i];
+
+        const binder::Status status =
+                mNetd->setProcSysNet(td.ipversion, td.which, td.ifname, td.parameter, td.value);
 
         if (td.expectedReturnCode == 0) {
             SCOPED_TRACE(String8::format("test case %d should have passed", i));
@@ -819,6 +918,29 @@ TEST_F(BinderTest, TestSetProcSysNet) {
     }
 }
 
+TEST_F(BinderTest, GetSetProcSysNet) {
+    const int ipversion = INetd::IPV6;
+    const int category = INetd::NEIGH;
+    const std::string& tun = sTun.name();
+    const std::string parameter("ucast_solicit");
+
+    std::string value{};
+    EXPECT_TRUE(mNetd->getProcSysNet(ipversion, category, tun, parameter, &value).isOk());
+    EXPECT_FALSE(value.empty());
+    const int ival = std::stoi(value);
+    EXPECT_GT(ival, 0);
+    // Try doubling the parameter value (always best!).
+    EXPECT_TRUE(mNetd->setProcSysNet(ipversion, category, tun, parameter, std::to_string(2 * ival))
+            .isOk());
+    EXPECT_TRUE(mNetd->getProcSysNet(ipversion, category, tun, parameter, &value).isOk());
+    EXPECT_EQ(2 * ival, std::stoi(value));
+    // Try resetting the parameter.
+    EXPECT_TRUE(mNetd->setProcSysNet(ipversion, category, tun, parameter, std::to_string(ival))
+            .isOk());
+    EXPECT_TRUE(mNetd->getProcSysNet(ipversion, category, tun, parameter, &value).isOk());
+    EXPECT_EQ(ival, std::stoi(value));
+}
+
 static std::string base64Encode(const std::vector<uint8_t>& input) {
     size_t out_len;
     EXPECT_EQ(1, EVP_EncodedLength(&out_len, input.size()));
@@ -828,7 +950,7 @@ static std::string base64Encode(const std::vector<uint8_t>& input) {
     return std::string(reinterpret_cast<char*>(output_bytes));
 }
 
-TEST_F(BinderTest, TestSetResolverConfiguration_Tls) {
+TEST_F(BinderTest, SetResolverConfiguration_Tls) {
     const std::vector<std::string> LOCALLY_ASSIGNED_DNS{"8.8.8.8", "2001:4860:4860::8888"};
     std::vector<uint8_t> fp(SHA256_SIZE);
     std::vector<uint8_t> short_fp(1);
@@ -883,6 +1005,8 @@ TEST_F(BinderTest, TestSetResolverConfiguration_Tls) {
         "", {}, {});
 }
 
+namespace {
+
 void expectNoTestCounterRules() {
     for (const auto& binary : { IPTABLES_PATH, IP6TABLES_PATH }) {
         std::string command = StringPrintf("%s -w -nvL tetherctrl_counters", binary);
@@ -904,7 +1028,9 @@ void delTetherCounterValues(const char* path, const std::string& if1, const std:
                             path, if2.c_str(), if1.c_str()));
 }
 
-TEST_F(BinderTest, TestTetherGetStats) {
+}  // namespace
+
+TEST_F(BinderTest, TetherGetStats) {
     expectNoTestCounterRules();
 
     // TODO: fold this into more comprehensive tests once we have binder RPCs for enabling and
@@ -959,10 +1085,11 @@ TEST_F(BinderTest, TestTetherGetStats) {
 
     expectNoTestCounterRules();
 }
+
 namespace {
 
-constexpr char chainName_LOCAL_RAW_PREROUTING[] = "idletimer_raw_PREROUTING";
-constexpr char chainName_MANGLE_POSTROUTING[] = "idletimer_mangle_POSTROUTING";
+constexpr char IDLETIMER_RAW_PREROUTING[] = "idletimer_raw_PREROUTING";
+constexpr char IDLETIMER_MANGLE_POSTROUTING[] = "idletimer_mangle_POSTROUTING";
 
 static std::vector<std::string> listIptablesRuleByTable(const char* binary, const char* table,
                                                         const char* chainName) {
@@ -970,7 +1097,7 @@ static std::vector<std::string> listIptablesRuleByTable(const char* binary, cons
     return runCommand(command);
 }
 
-bool iptablesIdleTimerInterfcaeRuleExists(const char* binary, const char* chainName,
+bool iptablesIdleTimerInterfaceRuleExists(const char* binary, const char* chainName,
                                           const std::string& expectedInterface,
                                           const std::string& expectedRule, const char* table) {
     std::vector<std::string> rules = listIptablesRuleByTable(binary, table, chainName);
@@ -985,30 +1112,32 @@ bool iptablesIdleTimerInterfcaeRuleExists(const char* binary, const char* chainN
 }
 
 void expectIdletimerInterfaceRuleExists(const std::string& ifname, int timeout,
-                                        const std::string& classLable) {
+                                        const std::string& classLabel) {
     std::string IdletimerRule =
-            StringPrintf("timeout:%u label:%s send_nl_msg:1", timeout, classLable.c_str());
+            StringPrintf("timeout:%u label:%s send_nl_msg:1", timeout, classLabel.c_str());
     for (const auto& binary : {IPTABLES_PATH, IP6TABLES_PATH}) {
-        EXPECT_TRUE(iptablesIdleTimerInterfcaeRuleExists(binary, chainName_LOCAL_RAW_PREROUTING,
-                                                         ifname, IdletimerRule, RAW_TABLE));
-        EXPECT_TRUE(iptablesIdleTimerInterfcaeRuleExists(binary, chainName_MANGLE_POSTROUTING,
+        EXPECT_TRUE(iptablesIdleTimerInterfaceRuleExists(binary, IDLETIMER_RAW_PREROUTING, ifname,
+                                                         IdletimerRule, RAW_TABLE));
+        EXPECT_TRUE(iptablesIdleTimerInterfaceRuleExists(binary, IDLETIMER_MANGLE_POSTROUTING,
                                                          ifname, IdletimerRule, MANGLE_TABLE));
     }
 }
 
 void expectIdletimerInterfaceRuleNotExists(const std::string& ifname, int timeout,
-                                           const std::string& classLable) {
+                                           const std::string& classLabel) {
     std::string IdletimerRule =
-            StringPrintf("timeout:%u label:%s send_nl_msg:1", timeout, classLable.c_str());
+            StringPrintf("timeout:%u label:%s send_nl_msg:1", timeout, classLabel.c_str());
     for (const auto& binary : {IPTABLES_PATH, IP6TABLES_PATH}) {
-        EXPECT_FALSE(iptablesIdleTimerInterfcaeRuleExists(binary, chainName_LOCAL_RAW_PREROUTING,
-                                                          ifname, IdletimerRule, RAW_TABLE));
-        EXPECT_FALSE(iptablesIdleTimerInterfcaeRuleExists(binary, chainName_MANGLE_POSTROUTING,
+        EXPECT_FALSE(iptablesIdleTimerInterfaceRuleExists(binary, IDLETIMER_RAW_PREROUTING, ifname,
+                                                          IdletimerRule, RAW_TABLE));
+        EXPECT_FALSE(iptablesIdleTimerInterfaceRuleExists(binary, IDLETIMER_MANGLE_POSTROUTING,
                                                           ifname, IdletimerRule, MANGLE_TABLE));
     }
 }
 
-TEST_F(BinderTest, TestIdletimerAddRemoveInterface) {
+}  // namespace
+
+TEST_F(BinderTest, IdletimerAddRemoveInterface) {
     // TODO: We will get error in if expectIdletimerInterfaceRuleNotExists if there are the same
     // rule in the table. Because we only check the result after calling remove function. We might
     // check the actual rule which is removed by our function (maybe compare the results between
@@ -1032,8 +1161,6 @@ TEST_F(BinderTest, TestIdletimerAddRemoveInterface) {
         expectIdletimerInterfaceRuleNotExists(td.ifname, td.timeout, td.classLabel);
     }
 }
-
-}  // namespace
 
 namespace {
 
@@ -1072,7 +1199,9 @@ void expectStrictSetUidReject(const int uid) {
     }
 }
 
-TEST_F(BinderTest, TestStrictSetUidCleartextPenalty) {
+}  // namespace
+
+TEST_F(BinderTest, StrictSetUidCleartextPenalty) {
     binder::Status status;
     int32_t uid = randomUid();
 
@@ -1100,14 +1229,16 @@ TEST_F(BinderTest, TestStrictSetUidCleartextPenalty) {
     EXPECT_EQ(EINVAL, status.serviceSpecificErrorCode());
 }
 
-}  // namespace
+namespace {
 
-static bool processExists(const std::string& processName) {
+bool processExists(const std::string& processName) {
     std::string cmd = StringPrintf("ps -A | grep '%s'", processName.c_str());
     return (runCommand(cmd.c_str()).size()) ? true : false;
 }
 
-TEST_F(BinderTest, TestClatdStartStop) {
+}  // namespace
+
+TEST_F(BinderTest, ClatdStartStop) {
     binder::Status status;
     // use dummy0 for test since it is set ready
     static const char testIf[] = "dummy0";
@@ -1147,7 +1278,7 @@ void expectIpfwdEnable(bool enable) {
     EXPECT_EQ(enable, enableIPv6);
 }
 
-bool ipRuleIpfwdExists(const char* ipVersion, const std::string ipfwdRule) {
+bool ipRuleIpfwdExists(const char* ipVersion, const std::string& ipfwdRule) {
     std::vector<std::string> rules = listIpRules(ipVersion);
     for (const auto& rule : rules) {
         if (rule.find(ipfwdRule) != std::string::npos) {
@@ -1208,4 +1339,329 @@ TEST_F(BinderTest, TestIpfwdAddRemoveInterfaceForward) {
     status = mNetd->ipfwdRemoveInterfaceForward(testFromIf, testToIf);
     EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
     expectIpfwdRuleNotExists(testFromIf, testToIf);
+}
+
+namespace {
+
+constexpr char BANDWIDTH_INPUT[] = "bw_INPUT";
+constexpr char BANDWIDTH_OUTPUT[] = "bw_OUTPUT";
+constexpr char BANDWIDTH_FORWARD[] = "bw_FORWARD";
+constexpr char BANDWIDTH_NAUGHTY[] = "bw_penalty_box";
+constexpr char BANDWIDTH_NICE[] = "bw_happy_box";
+
+// TODO: move iptablesTargetsExists and listIptablesRuleByTable to the top.
+bool iptablesTargetsExists(const char* binary, int expectedCount, const char* table,
+                           const char* chainName, const std::string& expectedTargetA,
+                           const std::string& expectedTargetB) {
+    std::vector<std::string> rules = listIptablesRuleByTable(binary, table, chainName);
+    int matchCount = 0;
+
+    for (const auto& rule : rules) {
+        if (rule.find(expectedTargetA) != std::string::npos) {
+            if (rule.find(expectedTargetB) != std::string::npos) {
+                matchCount++;
+            }
+        }
+    }
+    return matchCount == expectedCount;
+}
+
+void expectXtQuotaValueEqual(const char* ifname, long quotaBytes) {
+    std::string path = StringPrintf("/proc/net/xt_quota/%s", ifname);
+    std::string result = "";
+
+    EXPECT_TRUE(ReadFileToString(path, &result));
+    // Quota value might be decreased while matching packets
+    EXPECT_GE(quotaBytes, std::stol(Trim(result)));
+}
+
+void expectBandwidthInterfaceQuotaRuleExists(const char* ifname, long quotaBytes) {
+    std::string BANDWIDTH_COSTLY_IF = StringPrintf("bw_costly_%s", ifname);
+    std::string quotaRule = StringPrintf("quota %s", ifname);
+
+    for (const auto& binary : {IPTABLES_PATH, IP6TABLES_PATH}) {
+        EXPECT_TRUE(iptablesTargetsExists(binary, 1, FILTER_TABLE, BANDWIDTH_INPUT, ifname,
+                                          BANDWIDTH_COSTLY_IF));
+        EXPECT_TRUE(iptablesTargetsExists(binary, 1, FILTER_TABLE, BANDWIDTH_OUTPUT, ifname,
+                                          BANDWIDTH_COSTLY_IF));
+        EXPECT_TRUE(iptablesTargetsExists(binary, 2, FILTER_TABLE, BANDWIDTH_FORWARD, ifname,
+                                          BANDWIDTH_COSTLY_IF));
+        EXPECT_TRUE(iptablesRuleExists(binary, BANDWIDTH_COSTLY_IF.c_str(), BANDWIDTH_NAUGHTY));
+        EXPECT_TRUE(iptablesRuleExists(binary, BANDWIDTH_COSTLY_IF.c_str(), quotaRule));
+    }
+    expectXtQuotaValueEqual(ifname, quotaBytes);
+}
+
+void expectBandwidthInterfaceQuotaRuleDoesNotExist(const char* ifname) {
+    std::string BANDWIDTH_COSTLY_IF = StringPrintf("bw_costly_%s", ifname);
+    std::string quotaRule = StringPrintf("quota %s", ifname);
+
+    for (const auto& binary : {IPTABLES_PATH, IP6TABLES_PATH}) {
+        EXPECT_FALSE(iptablesTargetsExists(binary, 1, FILTER_TABLE, BANDWIDTH_INPUT, ifname,
+                                           BANDWIDTH_COSTLY_IF));
+        EXPECT_FALSE(iptablesTargetsExists(binary, 1, FILTER_TABLE, BANDWIDTH_OUTPUT, ifname,
+                                           BANDWIDTH_COSTLY_IF));
+        EXPECT_FALSE(iptablesTargetsExists(binary, 2, FILTER_TABLE, BANDWIDTH_FORWARD, ifname,
+                                           BANDWIDTH_COSTLY_IF));
+        EXPECT_FALSE(iptablesRuleExists(binary, BANDWIDTH_COSTLY_IF.c_str(), BANDWIDTH_NAUGHTY));
+        EXPECT_FALSE(iptablesRuleExists(binary, BANDWIDTH_COSTLY_IF.c_str(), quotaRule));
+    }
+}
+
+void expectBandwidthInterfaceAlertRuleExists(const char* ifname, long alertBytes) {
+    std::string BANDWIDTH_COSTLY_IF = StringPrintf("bw_costly_%s", ifname);
+    std::string alertRule = StringPrintf("quota %sAlert", ifname);
+    std::string alertName = StringPrintf("%sAlert", ifname);
+
+    for (const auto& binary : {IPTABLES_PATH, IP6TABLES_PATH}) {
+        EXPECT_TRUE(iptablesRuleExists(binary, BANDWIDTH_COSTLY_IF.c_str(), alertRule));
+    }
+    expectXtQuotaValueEqual(alertName.c_str(), alertBytes);
+}
+
+void expectBandwidthInterfaceAlertRuleDoesNotExist(const char* ifname) {
+    std::string BANDWIDTH_COSTLY_IF = StringPrintf("bw_costly_%s", ifname);
+    std::string alertRule = StringPrintf("quota %sAlert", ifname);
+
+    for (const auto& binary : {IPTABLES_PATH, IP6TABLES_PATH}) {
+        EXPECT_FALSE(iptablesRuleExists(binary, BANDWIDTH_COSTLY_IF.c_str(), alertRule));
+    }
+}
+
+void expectBandwidthGlobalAlertRuleExists(long alertBytes) {
+    static const char globalAlertRule[] = "quota globalAlert";
+    static const char globalAlertName[] = "globalAlert";
+
+    for (const auto& binary : {IPTABLES_PATH, IP6TABLES_PATH}) {
+        EXPECT_TRUE(iptablesRuleExists(binary, BANDWIDTH_INPUT, globalAlertRule));
+        EXPECT_TRUE(iptablesRuleExists(binary, BANDWIDTH_OUTPUT, globalAlertRule));
+    }
+    expectXtQuotaValueEqual(globalAlertName, alertBytes);
+}
+
+void expectBandwidthManipulateSpecialAppRuleExists(const char* chain, const char* target, int uid) {
+    std::string uidRule = StringPrintf("owner UID match %u", uid);
+
+    for (const auto& binary : {IPTABLES_PATH, IP6TABLES_PATH}) {
+        EXPECT_TRUE(iptablesTargetsExists(binary, 1, FILTER_TABLE, chain, target, uidRule));
+    }
+}
+
+void expectBandwidthManipulateSpecialAppRuleDoesNotExist(const char* chain, int uid) {
+    std::string uidRule = StringPrintf("owner UID match %u", uid);
+
+    for (const auto& binary : {IPTABLES_PATH, IP6TABLES_PATH}) {
+        EXPECT_FALSE(iptablesRuleExists(binary, chain, uidRule));
+    }
+}
+
+}  // namespace
+
+TEST_F(BinderTest, BandwidthSetRemoveInterfaceQuota) {
+    long testQuotaBytes = 5550;
+
+    // Add test physical network
+    EXPECT_TRUE(mNetd->networkCreatePhysical(TEST_NETID1, "").isOk());
+    EXPECT_TRUE(mNetd->networkAddInterface(TEST_NETID1, sTun.name()).isOk());
+
+    binder::Status status = mNetd->bandwidthSetInterfaceQuota(sTun.name(), testQuotaBytes);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthInterfaceQuotaRuleExists(sTun.name().c_str(), testQuotaBytes);
+
+    status = mNetd->bandwidthRemoveInterfaceQuota(sTun.name());
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthInterfaceQuotaRuleDoesNotExist(sTun.name().c_str());
+
+    // Remove test physical network
+    EXPECT_TRUE(mNetd->networkDestroy(TEST_NETID1).isOk());
+}
+
+TEST_F(BinderTest, BandwidthSetRemoveInterfaceAlert) {
+    long testAlertBytes = 373;
+    // Add test physical network
+    EXPECT_TRUE(mNetd->networkCreatePhysical(TEST_NETID1, "").isOk());
+    EXPECT_TRUE(mNetd->networkAddInterface(TEST_NETID1, sTun.name()).isOk());
+    // Need to have a prior interface quota set to set an alert
+    binder::Status status = mNetd->bandwidthSetInterfaceQuota(sTun.name(), testAlertBytes);
+    status = mNetd->bandwidthSetInterfaceAlert(sTun.name(), testAlertBytes);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthInterfaceAlertRuleExists(sTun.name().c_str(), testAlertBytes);
+
+    status = mNetd->bandwidthRemoveInterfaceAlert(sTun.name());
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthInterfaceAlertRuleDoesNotExist(sTun.name().c_str());
+
+    // Remove interface quota
+    status = mNetd->bandwidthRemoveInterfaceQuota(sTun.name());
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthInterfaceQuotaRuleDoesNotExist(sTun.name().c_str());
+
+    // Remove test physical network
+    EXPECT_TRUE(mNetd->networkDestroy(TEST_NETID1).isOk());
+}
+
+TEST_F(BinderTest, BandwidthSetGlobalAlert) {
+    long testAlertBytes = 2097149;
+
+    binder::Status status = mNetd->bandwidthSetGlobalAlert(testAlertBytes);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthGlobalAlertRuleExists(testAlertBytes);
+
+    testAlertBytes = 2097152;
+    status = mNetd->bandwidthSetGlobalAlert(testAlertBytes);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthGlobalAlertRuleExists(testAlertBytes);
+}
+
+TEST_F(BinderTest, BandwidthManipulateSpecialApp) {
+    SKIP_IF_BPF_SUPPORTED;
+
+    int32_t uid = randomUid();
+    static const char targetReject[] = "REJECT";
+    static const char targetReturn[] = "RETURN";
+
+    // add NaughtyApp
+    binder::Status status = mNetd->bandwidthAddNaughtyApp(uid);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthManipulateSpecialAppRuleExists(BANDWIDTH_NAUGHTY, targetReject, uid);
+
+    // remove NaughtyApp
+    status = mNetd->bandwidthRemoveNaughtyApp(uid);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthManipulateSpecialAppRuleDoesNotExist(BANDWIDTH_NAUGHTY, uid);
+
+    // add NiceApp
+    status = mNetd->bandwidthAddNiceApp(uid);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthManipulateSpecialAppRuleExists(BANDWIDTH_NICE, targetReturn, uid);
+
+    // remove NiceApp
+    status = mNetd->bandwidthRemoveNiceApp(uid);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectBandwidthManipulateSpecialAppRuleDoesNotExist(BANDWIDTH_NICE, uid);
+}
+
+namespace {
+
+int readIntFromPath(const std::string& path) {
+    std::string result = "";
+    EXPECT_TRUE(ReadFileToString(path, &result));
+    return std::stoi(result);
+}
+
+int getTetherAcceptIPv6Ra(const std::string& ifName) {
+    std::string path = StringPrintf("/proc/sys/net/ipv6/conf/%s/accept_ra", ifName.c_str());
+    return readIntFromPath(path);
+}
+
+bool getTetherAcceptIPv6Dad(const std::string& ifName) {
+    std::string path = StringPrintf("/proc/sys/net/ipv6/conf/%s/accept_dad", ifName.c_str());
+    return readIntFromPath(path);
+}
+
+int getTetherIPv6DadTransmits(const std::string& ifName) {
+    std::string path = StringPrintf("/proc/sys/net/ipv6/conf/%s/dad_transmits", ifName.c_str());
+    return readIntFromPath(path);
+}
+
+bool getTetherEnableIPv6(const std::string& ifName) {
+    std::string path = StringPrintf("/proc/sys/net/ipv6/conf/%s/disable_ipv6", ifName.c_str());
+    int disableIPv6 = readIntFromPath(path);
+    return !disableIPv6;
+}
+
+bool interfaceListContains(const std::vector<std::string>& ifList, const std::string& ifName) {
+    for (const auto& iface : ifList) {
+        if (iface == ifName) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void expectTetherInterfaceConfigureForIPv6Router(const std::string& ifName) {
+    EXPECT_EQ(getTetherAcceptIPv6Ra(ifName), 0);
+    EXPECT_FALSE(getTetherAcceptIPv6Dad(ifName));
+    EXPECT_EQ(getTetherIPv6DadTransmits(ifName), 0);
+    EXPECT_TRUE(getTetherEnableIPv6(ifName));
+}
+
+void expectTetherInterfaceConfigureForIPv6Client(const std::string& ifName) {
+    EXPECT_EQ(getTetherAcceptIPv6Ra(ifName), 2);
+    EXPECT_TRUE(getTetherAcceptIPv6Dad(ifName));
+    EXPECT_EQ(getTetherIPv6DadTransmits(ifName), 1);
+    EXPECT_FALSE(getTetherEnableIPv6(ifName));
+}
+
+void expectTetherInterfaceExists(const std::vector<std::string>& ifList,
+                                 const std::string& ifName) {
+    EXPECT_TRUE(interfaceListContains(ifList, ifName));
+}
+
+void expectTetherInterfaceNotExists(const std::vector<std::string>& ifList,
+                                    const std::string& ifName) {
+    EXPECT_FALSE(interfaceListContains(ifList, ifName));
+}
+
+void expectTetherDnsListEquals(const std::vector<std::string>& dnsList,
+                               const std::vector<std::string>& testDnsAddrs) {
+    EXPECT_TRUE(dnsList == testDnsAddrs);
+}
+
+}  // namespace
+
+TEST_F(BinderTest, TetherStartStopStatus) {
+    std::vector<std::string> noDhcpRange = {};
+    static const char dnsdName[] = "dnsmasq";
+
+    binder::Status status = mNetd->tetherStart(noDhcpRange);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    EXPECT_TRUE(processExists(dnsdName));
+
+    bool tetherEnabled;
+    status = mNetd->tetherIsEnabled(&tetherEnabled);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    EXPECT_TRUE(tetherEnabled);
+
+    status = mNetd->tetherStop();
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    EXPECT_FALSE(processExists(dnsdName));
+
+    status = mNetd->tetherIsEnabled(&tetherEnabled);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    EXPECT_FALSE(tetherEnabled);
+}
+
+TEST_F(BinderTest, TetherInterfaceAddRemoveList) {
+    // TODO: verify if dnsmasq update interface successfully
+
+    binder::Status status = mNetd->tetherInterfaceAdd(sTun.name());
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectTetherInterfaceConfigureForIPv6Router(sTun.name());
+
+    std::vector<std::string> ifList;
+    status = mNetd->tetherInterfaceList(&ifList);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectTetherInterfaceExists(ifList, sTun.name());
+
+    status = mNetd->tetherInterfaceRemove(sTun.name());
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectTetherInterfaceConfigureForIPv6Client(sTun.name());
+
+    status = mNetd->tetherInterfaceList(&ifList);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectTetherInterfaceNotExists(ifList, sTun.name());
+}
+
+TEST_F(BinderTest, TetherDnsSetList) {
+    // TODO: verify if dnsmasq update dns successfully
+    std::vector<std::string> testDnsAddrs = {"192.168.1.37", "213.137.100.3"};
+
+    binder::Status status = mNetd->tetherDnsSet(TEST_NETID1, testDnsAddrs);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+
+    std::vector<std::string> dnsList;
+    status = mNetd->tetherDnsList(&dnsList);
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+    expectTetherDnsListEquals(dnsList, testDnsAddrs);
 }

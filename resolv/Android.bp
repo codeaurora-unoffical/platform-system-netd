@@ -1,0 +1,44 @@
+cc_library_shared {
+    name: "libnetd_resolv",
+    defaults: ["netd_defaults"],
+    srcs: [
+        "getaddrinfo.cpp",
+        "gethnamaddr.cpp",
+        "sethostent.cpp",
+        "res_cache.cpp",
+        "res_comp.cpp",
+        "res_data.cpp",
+        "res_debug.cpp",
+        "res_init.cpp",
+        "res_mkquery.cpp",
+        "res_query.cpp",
+        "res_send.cpp",
+        "res_state.cpp",
+        "res_stats.cpp",
+    ],
+    // Link everything statically (except for libc) to minimize our dependence
+    // on system ABIs
+    stl: "libc++_static",
+    static_libs: [
+        "libbase",
+        "liblog",
+    ],
+    // Only export the symbols that we explicitly mark as visible
+    cflags: [
+        "-fvisibility=hidden",
+    ],
+    // Also hide symbols defined by the static libraries we depend on
+    ldflags: [
+        "-Wl,--exclude-libs,ALL",
+    ],
+    export_include_dirs: ["."],  // Export resolv_netid.h
+    // TODO: pie in the sky: make this code clang-tidy clean
+    tidy: false,
+    product_variables: {
+        debuggable: {
+            cppflags: [
+                "-DRESOLV_ALLOW_VERBOSE_LOGGING=1",
+            ],
+        },
+    },
+}

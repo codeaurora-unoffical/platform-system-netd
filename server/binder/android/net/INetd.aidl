@@ -291,20 +291,24 @@ interface INetd {
     /**
      * Set and get /proc/sys/net interface configuration parameters.
      *
-     * @param family One of IPV4/IPV6 integers, indicating the desired address family directory.
+     * @param ipversion One of IPV4/IPV6 integers, indicating the desired IP version directory.
      * @param which One of CONF/NEIGH integers, indicating the desired parameter category directory.
      * @param ifname The interface name portion of the path; may also be "all" or "default".
      * @param parameter The parameter name portion of the path.
      * @param value The value string to be written into the assembled path.
+     *
+     * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
+     *         unix errno.
      */
 
     const int IPV4  = 4;
     const int IPV6  = 6;
     const int CONF  = 1;
     const int NEIGH = 2;
-    void setProcSysNet(int family, int which, in @utf8InCpp String ifname,
+    @utf8InCpp String getProcSysNet(int ipversion, int which, in @utf8InCpp String ifname,
+            in @utf8InCpp String parameter);
+    void setProcSysNet(int ipversion, int which, in @utf8InCpp String ifname,
             in @utf8InCpp String parameter, in @utf8InCpp String value);
-    // TODO: add corresponding getProcSysNet().
 
     /**
      * Get/Set metrics reporting level.
@@ -432,18 +436,20 @@ interface INetd {
     * Adds an IPsec global policy.
     *
     * @param transformId a unique identifier for allocated resources
+    * @param selAddrFamily the address family identifier for the selector
     * @param direction DIRECTION_IN or DIRECTION_OUT
-    * @param sourceAddress InetAddress as string for the sending endpoint
-    * @param destinationAddress InetAddress as string for the receiving endpoint
+    * @param tmplSrcAddress InetAddress as string for the sending endpoint
+    * @param tmplDstAddress InetAddress as string for the receiving endpoint
     * @param spi a 32-bit unique ID allocated to the user
     * @param markValue a 32-bit unique ID chosen by the user
     * @param markMask a 32-bit mask chosen by the user
     */
     void ipSecAddSecurityPolicy(
             int transformId,
+            int selAddrFamily,
             int direction,
-            in @utf8InCpp String sourceAddress,
-            in @utf8InCpp String destinationAddress,
+            in @utf8InCpp String tmplSrcAddress,
+            in @utf8InCpp String tmplDstAddress,
             int spi,
             int markValue,
             int markMask);
@@ -452,18 +458,20 @@ interface INetd {
     * Updates an IPsec global policy.
     *
     * @param transformId a unique identifier for allocated resources
+    * @param selAddrFamily the address family identifier for the selector
     * @param direction DIRECTION_IN or DIRECTION_OUT
-    * @param sourceAddress InetAddress as string for the sending endpoint
-    * @param destinationAddress InetAddress as string for the receiving endpoint
+    * @param tmplSrcAddress InetAddress as string for the sending endpoint
+    * @param tmplDstAddress InetAddress as string for the receiving endpoint
     * @param spi a 32-bit unique ID allocated to the user
     * @param markValue a 32-bit unique ID chosen by the user
     * @param markMask a 32-bit mask chosen by the user
     */
     void ipSecUpdateSecurityPolicy(
             int transformId,
+            int selAddrFamily,
             int direction,
-            in @utf8InCpp String sourceAddress,
-            in @utf8InCpp String destinationAddress,
+            in @utf8InCpp String tmplSrcAddress,
+            in @utf8InCpp String tmplDstAddress,
             int spi,
             int markValue,
             int markMask);
@@ -471,18 +479,19 @@ interface INetd {
    /**
     * Deletes an IPsec global policy.
     *
+    * Deletion of global policies does not do any matching based on the templates, thus
+    * template source/destination addresses are not needed (as opposed to add/update).
+    *
     * @param transformId a unique identifier for allocated resources
+    * @param selAddrFamily the address family identifier for the selector
     * @param direction DIRECTION_IN or DIRECTION_OUT
-    * @param sourceAddress InetAddress as string for the sending endpoint
-    * @param destinationAddress InetAddress as string for the receiving endpoint
     * @param markValue a 32-bit unique ID chosen by the user
     * @param markMask a 32-bit mask chosen by the user
     */
     void ipSecDeleteSecurityPolicy(
             int transformId,
+            int selAddrFamily,
             int direction,
-            in @utf8InCpp String sourceAddress,
-            in @utf8InCpp String destinationAddress,
             int markValue,
             int markMask);
 
@@ -673,4 +682,156 @@ interface INetd {
     */
     void ipfwdRemoveInterfaceForward(in @utf8InCpp String fromIface, in @utf8InCpp String toIface);
 
+   /**
+    * Set quota for interface
+    *
+    * @param ifName Name of target interface
+    * @param bytes Quota value in bytes
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void bandwidthSetInterfaceQuota(in @utf8InCpp String ifName, long bytes);
+
+   /**
+    * Remove quota for interface
+    *
+    * @param ifName Name of target interface
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void bandwidthRemoveInterfaceQuota(in @utf8InCpp String ifName);
+
+   /**
+    * Set alert for interface
+    *
+    * @param ifName Name of target interface
+    * @param bytes Alert value in bytes
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void bandwidthSetInterfaceAlert(in @utf8InCpp String ifName, long bytes);
+
+   /**
+    * Remove alert for interface
+    *
+    * @param ifName Name of target interface
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void bandwidthRemoveInterfaceAlert(in @utf8InCpp String ifName);
+
+   /**
+    * Set global alert
+    *
+    * @param bytes Alert value in bytes
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void bandwidthSetGlobalAlert(long bytes);
+
+   /**
+    * Add naughty app bandwidth rule for specific app
+    *
+    * @param uid uid of target app
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void bandwidthAddNaughtyApp(int uid);
+
+   /**
+    * Remove naughty app bandwidth rule for specific app
+    *
+    * @param uid uid of target app
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void bandwidthRemoveNaughtyApp(int uid);
+
+   /**
+    * Add nice app bandwidth rule for specific app
+    *
+    * @param uid uid of target app
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void bandwidthAddNiceApp(int uid);
+
+   /**
+    * Remove nice app bandwidth rule for specific app
+    *
+    * @param uid uid of target app
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void bandwidthRemoveNiceApp(int uid);
+
+   /**
+    * Start tethering
+    *
+    * @param dhcpRanges dhcp ranges to set.
+    *                   dhcpRanges might contain many addresss {addr1, addr2, aadr3, addr4...}
+    *                   Netd splits them into ranges: addr1-addr2, addr3-addr4, etc.
+    *                   An odd number of addrs will fail.
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void tetherStart(in @utf8InCpp String[] dhcpRanges);
+
+   /**
+    * Stop tethering
+    *
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void tetherStop();
+
+   /**
+    * Get status of tethering
+    *
+    * @return true if tethering is enabled, false otherwise.
+    */
+    boolean tetherIsEnabled();
+
+   /**
+    * Setup interface for tethering
+    *
+    * @param ifName interface name to add
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void tetherInterfaceAdd(in @utf8InCpp String ifName);
+
+   /**
+    * Reset interface for tethering
+    *
+    * @param ifName interface name to remove
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void tetherInterfaceRemove(in @utf8InCpp String ifName);
+
+   /**
+    * Get the interface list which is stored in netd
+    * The list contains the interfaces managed by tetherInterfaceAdd/tetherInterfaceRemove
+    *
+    * @return ifList interface list result
+    */
+    @utf8InCpp List<String> tetherInterfaceList();
+
+   /**
+    * Set dns forwarder server
+    *
+    * @param netId the upstream network to forward DNS queries to
+    * @param dnsAddrs DNS server address to set
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void tetherDnsSet(int netId, in @utf8InCpp String[] dnsAddrs);
+
+   /**
+    * Return the DNS list set by tetherDnsSet
+    *
+    * @return dnsList dns list result
+    */
+    @utf8InCpp List<String> tetherDnsList();
 }

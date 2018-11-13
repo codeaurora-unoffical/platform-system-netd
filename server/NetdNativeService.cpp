@@ -17,6 +17,7 @@
 #define LOG_TAG "Netd"
 
 #include <set>
+#include <tuple>
 #include <vector>
 
 #include <android-base/stringprintf.h>
@@ -57,10 +58,18 @@ const char DUMP[] = "android.permission.DUMP";
 const char OPT_SHORT[] = "--short";
 
 binder::Status checkPermission(const char *permission) {
-    pid_t pid;
-    uid_t uid;
+    pid_t pid = IPCThreadState::self()->getCallingPid();
+    uid_t uid = IPCThreadState::self()->getCallingUid();
 
-    if (checkCallingPermission(String16(permission), (int32_t *) &pid, (int32_t *) &uid)) {
+    // If the caller is the system UID, don't check permissions.
+    // Otherwise, if the system server's binder thread pool is full, and all the threads are
+    // blocked on a thread that's waiting for us to complete, we deadlock. http://b/69389492
+    //
+    // From a security perspective, there is currently no difference, because:
+    // 1. The only permissions we check in netd's binder interface are CONNECTIVITY_INTERNAL
+    //    and NETWORK_STACK, which the system server will always need to have.
+    // 2. AID_SYSTEM always has all permissions. See ActivityManager#checkComponentPermission.
+    if (uid == AID_SYSTEM || checkPermission(String16(permission), pid, uid)) {
         return binder::Status::ok();
     } else {
         auto err = StringPrintf("UID %d / PID %d lacks permission %s", uid, pid, permission);
@@ -205,6 +214,102 @@ binder::Status NetdNativeService::bandwidthEnableDataSaver(bool enable, bool *re
     *ret = (err == 0);
     gLog.log(entry.returns(*ret).withAutomaticDuration());
     return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::bandwidthSetInterfaceQuota(const std::string& ifName,
+                                                             int64_t bytes) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->bandwidthCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(ifName).arg(bytes);
+
+    int res = gCtls->bandwidthCtrl.setInterfaceQuota(ifName, bytes);
+
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::bandwidthRemoveInterfaceQuota(const std::string& ifName) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->bandwidthCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(ifName);
+
+    int res = gCtls->bandwidthCtrl.removeInterfaceQuota(ifName);
+
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::bandwidthSetInterfaceAlert(const std::string& ifName,
+                                                             int64_t bytes) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->bandwidthCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(ifName).arg(bytes);
+
+    int res = gCtls->bandwidthCtrl.setInterfaceAlert(ifName, bytes);
+
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::bandwidthRemoveInterfaceAlert(const std::string& ifName) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->bandwidthCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(ifName);
+
+    int res = gCtls->bandwidthCtrl.removeInterfaceAlert(ifName);
+
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::bandwidthSetGlobalAlert(int64_t bytes) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->bandwidthCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(bytes);
+
+    int res = gCtls->bandwidthCtrl.setGlobalAlert(bytes);
+
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::bandwidthAddNaughtyApp(int32_t uid) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->bandwidthCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(uid);
+
+    std::vector<std::string> appStrUids = {std::to_string(abs(uid))};
+    int res = gCtls->bandwidthCtrl.addNaughtyApps(appStrUids);
+
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::bandwidthRemoveNaughtyApp(int32_t uid) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->bandwidthCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(uid);
+
+    std::vector<std::string> appStrUids = {std::to_string(abs(uid))};
+    int res = gCtls->bandwidthCtrl.removeNaughtyApps(appStrUids);
+
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::bandwidthAddNiceApp(int32_t uid) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->bandwidthCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(uid);
+
+    std::vector<std::string> appStrUids = {std::to_string(abs(uid))};
+    int res = gCtls->bandwidthCtrl.addNiceApps(appStrUids);
+
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::bandwidthRemoveNiceApp(int32_t uid) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->bandwidthCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(uid);
+
+    std::vector<std::string> appStrUids = {std::to_string(abs(uid))};
+    int res = gCtls->bandwidthCtrl.removeNiceApps(appStrUids);
+
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
 }
 
 binder::Status NetdNativeService::networkCreatePhysical(int32_t netId,
@@ -444,25 +549,25 @@ binder::Status NetdNativeService::interfaceDelAddress(const std::string &ifName,
     return binder::Status::ok();
 }
 
-binder::Status NetdNativeService::setProcSysNet(
-        int32_t family, int32_t which, const std::string &ifname, const std::string &parameter,
-        const std::string &value) {
-    ENFORCE_PERMISSION(CONNECTIVITY_INTERNAL);
+namespace {
 
-    const char *familyStr;
-    switch (family) {
+std::tuple<binder::Status, const char*, const char*> getPathComponents(int32_t ipversion,
+                                                                       int32_t category) {
+    const char* ipversionStr = nullptr;
+    switch (ipversion) {
         case INetd::IPV4:
-            familyStr = "ipv4";
+            ipversionStr = "ipv4";
             break;
         case INetd::IPV6:
-            familyStr = "ipv6";
+            ipversionStr = "ipv6";
             break;
         default:
-            return binder::Status::fromServiceSpecificError(EAFNOSUPPORT, String8("Bad family"));
+            return {binder::Status::fromServiceSpecificError(EAFNOSUPPORT, "Bad IP version"),
+                    nullptr, nullptr};
     }
 
-    const char *whichStr;
-    switch (which) {
+    const char* whichStr = nullptr;
+    switch (category) {
         case INetd::CONF:
             whichStr = "conf";
             break;
@@ -470,17 +575,58 @@ binder::Status NetdNativeService::setProcSysNet(
             whichStr = "neigh";
             break;
         default:
-            return binder::Status::fromServiceSpecificError(EINVAL, String8("Bad category"));
+            return {binder::Status::fromServiceSpecificError(EINVAL, "Bad category"), nullptr,
+                    nullptr};
     }
 
-    const int err = InterfaceController::setParameter(
-            familyStr, whichStr, ifname.c_str(), parameter.c_str(),
-            value.c_str());
-    if (err != 0) {
-        return binder::Status::fromServiceSpecificError(-err,
-                String8::format("ResolverController error: %s", strerror(-err)));
+    return {binder::Status::ok(), ipversionStr, whichStr};
+}
+
+}  // namespace
+
+binder::Status NetdNativeService::getProcSysNet(int32_t ipversion, int32_t which,
+                                                const std::string& ifname,
+                                                const std::string& parameter, std::string* value) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__)
+                         .args(ipversion, which, ifname, parameter);
+
+    const auto pathParts = getPathComponents(ipversion, which);
+    const auto& pathStatus = std::get<0>(pathParts);
+    if (!pathStatus.isOk()) {
+        gLog.log(entry.returns(pathStatus.exceptionCode()).withAutomaticDuration());
+        return pathStatus;
     }
-    return binder::Status::ok();
+
+    const int err = InterfaceController::getParameter(std::get<1>(pathParts),
+                                                      std::get<2>(pathParts), ifname.c_str(),
+                                                      parameter.c_str(), value);
+    entry.returns(err);
+    if (err == 0) entry.returns(*value);
+    gLog.log(entry.withAutomaticDuration());
+    return statusFromErrcode(err);
+}
+
+binder::Status NetdNativeService::setProcSysNet(int32_t ipversion, int32_t which,
+                                                const std::string& ifname,
+                                                const std::string& parameter,
+                                                const std::string& value) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__)
+                         .args(ipversion, which, ifname, parameter, value);
+
+    const auto pathParts = getPathComponents(ipversion, which);
+    const auto& pathStatus = std::get<0>(pathParts);
+    if (!pathStatus.isOk()) {
+        gLog.log(entry.returns(pathStatus.exceptionCode()).withAutomaticDuration());
+        return pathStatus;
+    }
+
+    const int err = InterfaceController::setParameter(std::get<1>(pathParts),
+                                                      std::get<2>(pathParts), ifname.c_str(),
+                                                      parameter.c_str(), value.c_str());
+    gLog.log(entry.returns(err).withAutomaticDuration());
+    return statusFromErrcode(err);
 }
 
 binder::Status NetdNativeService::getMetricsReportingLevel(int *reportingLevel) {
@@ -549,13 +695,9 @@ binder::Status NetdNativeService::ipSecAddSecurityAssociation(
     ENFORCE_PERMISSION(CONNECTIVITY_INTERNAL);
     gLog.log("ipSecAddSecurityAssociation()");
     return asBinderStatus(gCtls->xfrmCtrl.ipSecAddSecurityAssociation(
-              transformId, mode, sourceAddress, destinationAddress,
-              underlyingNetId,
-              spi, markValue, markMask,
-              authAlgo, authKey, authTruncBits,
-              cryptAlgo, cryptKey, cryptTruncBits,
-              aeadAlgo, aeadKey, aeadIcvBits,
-              encapType, encapLocalPort, encapRemotePort));
+            transformId, mode, sourceAddress, destinationAddress, underlyingNetId, spi, markValue,
+            markMask, authAlgo, authKey, authTruncBits, cryptAlgo, cryptKey, cryptTruncBits,
+            aeadAlgo, aeadKey, aeadIcvBits, encapType, encapLocalPort, encapRemotePort));
 }
 
 binder::Status NetdNativeService::ipSecDeleteSecurityAssociation(
@@ -605,65 +747,44 @@ binder::Status NetdNativeService::ipSecRemoveTransportModeTransform(
                     socket));
 }
 
-binder::Status NetdNativeService::ipSecAddSecurityPolicy(
-        int32_t transformId,
-        int32_t direction,
-        const std::string& sourceAddress,
-        const std::string& destinationAddress,
-        int32_t spi,
-        int32_t markValue,
-        int32_t markMask){
+binder::Status NetdNativeService::ipSecAddSecurityPolicy(int32_t transformId, int32_t selAddrFamily,
+                                                         int32_t direction,
+                                                         const std::string& tmplSrcAddress,
+                                                         const std::string& tmplDstAddress,
+                                                         int32_t spi, int32_t markValue,
+                                                         int32_t markMask) {
     // Necessary locking done in IpSecService and kernel
     ENFORCE_PERMISSION(NETWORK_STACK);
     gLog.log("ipSecAddSecurityPolicy()");
     return asBinderStatus(gCtls->xfrmCtrl.ipSecAddSecurityPolicy(
-                    transformId,
-                    direction,
-                    sourceAddress,
-                    destinationAddress,
-                    spi,
-                    markValue,
-                    markMask));
+            transformId, selAddrFamily, direction, tmplSrcAddress, tmplDstAddress, spi, markValue,
+            markMask));
 }
 
-binder::Status NetdNativeService::ipSecUpdateSecurityPolicy(
-        int32_t transformId,
-        int32_t direction,
-        const std::string& sourceAddress,
-        const std::string& destinationAddress,
-        int32_t spi,
-        int32_t markValue,
-        int32_t markMask){
+binder::Status NetdNativeService::ipSecUpdateSecurityPolicy(int32_t transformId,
+                                                            int32_t selAddrFamily,
+                                                            int32_t direction,
+                                                            const std::string& tmplSrcAddress,
+                                                            const std::string& tmplDstAddress,
+                                                            int32_t spi, int32_t markValue,
+                                                            int32_t markMask) {
     // Necessary locking done in IpSecService and kernel
     ENFORCE_PERMISSION(NETWORK_STACK);
     gLog.log("ipSecAddSecurityPolicy()");
     return asBinderStatus(gCtls->xfrmCtrl.ipSecUpdateSecurityPolicy(
-                    transformId,
-                    direction,
-                    sourceAddress,
-                    destinationAddress,
-                    spi,
-                    markValue,
-                    markMask));
+            transformId, selAddrFamily, direction, tmplSrcAddress, tmplDstAddress, spi, markValue,
+            markMask));
 }
 
-binder::Status NetdNativeService::ipSecDeleteSecurityPolicy(
-        int32_t transformId,
-        int32_t direction,
-        const std::string& sourceAddress,
-        const std::string& destinationAddress,
-        int32_t markValue,
-        int32_t markMask){
+binder::Status NetdNativeService::ipSecDeleteSecurityPolicy(int32_t transformId,
+                                                            int32_t selAddrFamily,
+                                                            int32_t direction, int32_t markValue,
+                                                            int32_t markMask) {
     // Necessary locking done in IpSecService and kernel
     ENFORCE_PERMISSION(NETWORK_STACK);
     gLog.log("ipSecAddSecurityPolicy()");
     return asBinderStatus(gCtls->xfrmCtrl.ipSecDeleteSecurityPolicy(
-                    transformId,
-                    direction,
-                    sourceAddress,
-                    destinationAddress,
-                    markValue,
-                    markMask));
+            transformId, selAddrFamily, direction, markValue, markMask));
 }
 
 binder::Status NetdNativeService::addVirtualTunnelInterface(
@@ -854,6 +975,78 @@ binder::Status NetdNativeService::ipfwdRemoveInterfaceForward(const std::string&
     int res = RouteController::disableTethering(fromIface.c_str(), toIface.c_str());
     gLog.log(entry.returns(res).withAutomaticDuration());
     return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::tetherStart(const std::vector<std::string>& dhcpRanges) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->tetherCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(dhcpRanges);
+    if (dhcpRanges.size() % 2 == 1) {
+        return statusFromErrcode(-EINVAL);
+    }
+    int res = gCtls->tetherCtrl.startTethering(dhcpRanges);
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::tetherStop() {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->tetherCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
+    int res = gCtls->tetherCtrl.stopTethering();
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::tetherIsEnabled(bool* enabled) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->tetherCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
+    *enabled = gCtls->tetherCtrl.isTetheringStarted();
+    gLog.log(entry.returns(*enabled).withAutomaticDuration());
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::tetherInterfaceAdd(const std::string& ifName) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->tetherCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(ifName);
+    int res = gCtls->tetherCtrl.tetherInterface(ifName.c_str());
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::tetherInterfaceRemove(const std::string& ifName) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->tetherCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(ifName);
+    int res = gCtls->tetherCtrl.untetherInterface(ifName.c_str());
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::tetherInterfaceList(std::vector<std::string>* ifList) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->tetherCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
+    for (const auto& ifname : gCtls->tetherCtrl.getTetheredInterfaceList()) {
+        ifList->push_back(ifname);
+    }
+    gLog.log(entry.returns(true).withAutomaticDuration());
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::tetherDnsSet(int32_t netId,
+                                               const std::vector<std::string>& dnsAddrs) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->tetherCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(netId).arg(dnsAddrs);
+    int res = gCtls->tetherCtrl.setDnsForwarders(netId, dnsAddrs);
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::tetherDnsList(std::vector<std::string>* dnsList) {
+    NETD_LOCKING_RPC(NETWORK_STACK, gCtls->tetherCtrl.lock);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
+    for (const auto& fwdr : gCtls->tetherCtrl.getDnsForwarders()) {
+        dnsList->push_back(fwdr);
+    }
+    gLog.log(entry.returns(true).withAutomaticDuration());
+    return binder::Status::ok();
 }
 
 }  // namespace net

@@ -2,6 +2,7 @@ cc_library_static {
     name: "libnetddns",
     defaults: ["netd_defaults"],
     srcs: [
+        "Dns64Configuration.cpp",
         "DnsTlsDispatcher.cpp",
         "DnsTlsQueryMap.cpp",
         "DnsTlsTransport.cpp",
@@ -11,6 +12,7 @@ cc_library_static {
     ],
     shared_libs: [
         "libbase",
+        "libnetd_resolv",
         "libnetutils",
         "libssl",
     ],
@@ -23,4 +25,5 @@ cc_library_static {
         // TODO: Decide how to reorganize dns headers
         "system/netd/server",
     ],
+    export_include_dirs: ["."],
 }

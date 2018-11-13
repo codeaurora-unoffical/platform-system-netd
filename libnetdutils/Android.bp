@@ -2,6 +2,7 @@ cc_library {
     name: "libnetdutils",
     srcs: [
         "Fd.cpp",
+        "InternetAddresses.cpp",
         "Log.cpp",
         "Netfilter.cpp",
         "Netlink.cpp",
@@ -31,6 +32,7 @@ cc_test {
     srcs: [
         "BackoffSequenceTest.cpp",
         "FdTest.cpp",
+        "InternetAddressesTest.cpp",
         "LogTest.cpp",
         "MemBlockTest.cpp",
         "OperationLimiterTest.cpp",
@@ -40,11 +42,6 @@ cc_test {
     ],
     defaults: ["netd_defaults"],
     test_suites: ["device-tests"],
-    cflags: [
-        "-Wall",
-        "-Werror",
-        "-Wno-error=unused-variable",
-    ],
     static_libs: [
         "libgmock",
         "libnetdutils",

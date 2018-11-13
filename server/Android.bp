@@ -2,12 +2,14 @@
 filegroup {
     name: "netd_aidl",
     srcs: ["binder/android/net/INetd.aidl"],
+    path: "binder",
 }
 
 // AIDL interface between netd and services.core
 filegroup {
     name: "netd_metrics_aidl",
     srcs: ["binder/android/net/metrics/INetdEventListener.aidl"],
+    path: "binder",
 }
 
 // These are used in netd_integration_test
@@ -35,7 +37,7 @@ cc_library {
         include_dirs: ["frameworks/native/aidl/binder"],
     },
     srcs: [
-        "binder/android/net/INetd.aidl",
+        ":netd_aidl",
         "binder/android/net/UidRange.cpp",
     ],
     export_include_dirs: ["binder"],
@@ -46,7 +48,6 @@ cc_library_static {
     name: "libnetd_server",
     defaults: ["netd_defaults"],
     include_dirs: [
-        "bionic/libc/dns/include",
         "system/netd/include",
         "system/netd/server/binder",
     ],
@@ -71,10 +72,11 @@ cc_library_static {
         "UidRanges.cpp",
         "WakeupController.cpp",
         "XfrmController.cpp",
-        "binder/android/net/metrics/INetdEventListener.aidl",
+        ":netd_metrics_aidl",
     ],
     shared_libs: [
         "libbpf",
+        "libnetd_resolv",
         "libnetdaidl",
         "libbase",
         "libbinder",
@@ -95,7 +97,6 @@ cc_binary {
     name: "netd",
     defaults: ["netd_defaults"],
     include_dirs: [
-        "bionic/libc/dns/include",
         "external/mdnsresponder/mDNSShared",
         "system/netd/include",
     ],
@@ -103,6 +104,7 @@ cc_binary {
     shared_libs: [
         "android.system.net.netd@1.0",
         "android.system.net.netd@1.1",
+        "libbase",
         "libbinder",
         "libbpf",
         "libcrypto",
@@ -113,15 +115,15 @@ cc_binary {
         "liblog",
         "liblogwrap",
         "libmdnssd",
+        "libnetd_resolv",
         "libnetdaidl",
-        "libnetutils",
         "libnetdutils",
+        "libnetutils",
         "libpcap",
         "libqtaguid",
         "libselinux",
         "libssl",
         "libsysutils",
-        "libbase",
         "libutils",
     ],
     static_libs: [

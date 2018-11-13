@@ -41,18 +41,10 @@ cc_test {
         "resolver_test.cpp",
     ],
     include_dirs: [
-        "system/netd/include",
         "system/netd/server",
-        "system/core/logwrapper/include",
         "system/netd/tests/dns_responder",
-        "system/core/libnetutils/include",
-        "bionic/libc/dns/include",
+        "system/netd/resolv",
     ],
-    aidl: {
-        include_dirs: [
-            "system/netd/server/binder",
-        ],
-    },
     shared_libs: [
         "libbase",
         "libbinder",
@@ -83,5 +75,9 @@ cc_test {
         lib64: {
             suffix: "64",
         },
+    },
+    sanitize: {
+        address: true,
+        recover: [ "all" ],
     },
 }

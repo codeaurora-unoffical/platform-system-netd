@@ -23,12 +23,10 @@
 #include <netdutils/Status.h>
 #include <netdutils/StatusOr.h>
 
-// TODO: move InterfaceController into android::net namespace.
 namespace android {
 namespace net {
+
 class StablePrivacyTest;
-}  // namespace net
-}  // namespace android
 
 class InterfaceController {
 public:
@@ -47,6 +45,9 @@ public:
 
     // Read and write values in files of the form:
     //     /proc/sys/net/<family>/<which>/<interface>/<parameter>
+    //
+    // NOTE: getParameter() trims whitespace so the caller does not need extra
+    // code to crop trailing newlines, for example.
     static int getParameter(
             const char *family, const char *which, const char *interface, const char *parameter,
             std::string *value);
@@ -79,5 +80,8 @@ private:
   InterfaceController() = delete;
   ~InterfaceController() = delete;
 };
+
+}  // namespace net
+}  // namespace android
 
 #endif
