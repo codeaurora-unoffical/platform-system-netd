@@ -30,10 +30,6 @@
 #include "resolv_netid.h"
 #include "Stopwatch.h"
 
-#ifdef USE_WRAPPER
-#include "codeaurora/PropClientDispatch.h"
-#endif
-
 namespace {
 
 std::atomic_uint netIdForProcess(NETID_UNSET);
@@ -43,10 +39,6 @@ typedef int (*Accept4FunctionType)(int, sockaddr*, socklen_t*, int);
 typedef int (*ConnectFunctionType)(int, const sockaddr*, socklen_t);
 typedef int (*SocketFunctionType)(int, int, int);
 typedef unsigned (*NetIdForResolvFunctionType)(unsigned);
-
-#ifdef USE_WRAPPER
-typedef void (*SetConnectFunc) (ConnectFunctionType*);
-#endif
 
 // These variables are only modified at startup (when libc.so is loaded) and never afterwards, so
 // it's okay that they are read later at runtime without a lock.
@@ -95,18 +87,7 @@ int netdClientConnect(int sockfd, const sockaddr* addr, socklen_t addrlen) {
     }
     // Latency measurement does not include time of sending commands to Fwmark
     Stopwatch s;
-    int ret = -1;
-
-#ifdef USE_WRAPPER
-    if (shouldSetFwmark && (__propClientDispatch.propConnect != nullptr)) {
-        ret = __propClientDispatch.propConnect(sockfd, addr, addrlen);
-    } else {
-        ret = libcConnect(sockfd, addr, addrlen);
-    }
-#else
-    ret = libcConnect(sockfd, addr, addrlen);
-#endif
-
+    const int ret = libcConnect(sockfd, addr, addrlen);
     // Save errno so it isn't clobbered by sending ON_CONNECT_COMPLETE
     const int connectErrno = errno;
     const unsigned latencyMs = lround(s.timeTaken());
@@ -124,17 +105,7 @@ int netdClientConnect(int sockfd, const sockaddr* addr, socklen_t addrlen) {
 }
 
 int netdClientSocket(int domain, int type, int protocol) {
-
-    int socketFd;
-#ifndef USE_WRAPPER
-    socketFd = libcSocket(domain, type, protocol);
-#else
-    if( __propClientDispatch.propSocket ) {
-        socketFd = __propClientDispatch.propSocket(domain, type, protocol);
-    } else {
-        socketFd = libcSocket(domain, type, protocol);
-    }
-#endif
+    int socketFd = libcSocket(domain, type, protocol);
     if (socketFd == -1) {
         return -1;
     }
