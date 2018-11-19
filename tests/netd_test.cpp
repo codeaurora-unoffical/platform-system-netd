@@ -521,6 +521,72 @@ TEST_F(ResolverTest, GetAddrInfoBrokenEdns) {
     }
 }
 
+TEST_F(ResolverTest, GetAddrInfoForCaseInSensitiveDomains) {
+    addrinfo* result = nullptr;
+
+    const char* listen_addr = "127.0.0.4";
+    const char* listen_srv = "53";
+    const char* host_name = "howdy.example.com.";
+    const char* host_name2 = "HOWDY.example.com.";
+    test::DNSResponder dns(listen_addr, listen_srv, 250,
+                           ns_rcode::ns_r_servfail, 1.0);
+    dns.addMapping(host_name, ns_type::ns_t_a, "1.2.3.4");
+    dns.addMapping(host_name, ns_type::ns_t_aaaa, "::1.2.3.4");
+
+    dns.addMapping(host_name2, ns_type::ns_t_a, "1.2.3.5");
+    dns.addMapping(host_name2, ns_type::ns_t_aaaa, "::1.2.3.5");
+    ASSERT_TRUE(dns.startServer());
+
+    std::vector<std::string> servers = { listen_addr };
+    ASSERT_TRUE(SetResolversForNetwork(servers, mDefaultSearchDomains,
+            mDefaultParams_Binder));
+    dns.clearQueries();
+
+    EXPECT_EQ(0, getaddrinfo("howdy", nullptr, nullptr, &result));
+    size_t found = GetNumQueries(dns, host_name);
+    EXPECT_LE(1U, found);
+    // Could be A or AAAA
+    std::string result_str = ToString(result);
+    EXPECT_TRUE(result_str == "1.2.3.4" || result_str == "::1.2.3.4")
+        << ", result_str='" << result_str << "'";
+    if (result) {
+        freeaddrinfo(result);
+        result = nullptr;
+    }
+
+    // Verify that the name is cached.
+    size_t old_found = found;
+    EXPECT_EQ(0, getaddrinfo("HOWDY", nullptr, nullptr, &result));
+    found = GetNumQueries(dns, host_name);
+    EXPECT_LE(1U, found);
+    // verify that there is no change in num of queries for howdy.example.com
+    EXPECT_EQ(old_found, found);
+    found = GetNumQueries(dns, host_name2);
+    // Number of queries for HOWDY.example.com would be >= 1 if domain names
+    // are considered case-sensitive, else number of queries should be 0.
+    EXPECT_EQ(0U, found);
+    result_str = ToString(result);
+    EXPECT_TRUE(result_str == "1.2.3.4" || result_str == "::1.2.3.4")
+        << result_str;
+    if (result) {
+        freeaddrinfo(result);
+        result = nullptr;
+    }
+
+    // verify that the result is still the same address even though
+    // mixed-case string is not in the DNS
+    EXPECT_EQ(0, getaddrinfo("HowDY", nullptr, nullptr, &result));
+    result_str = ToString(result);
+    EXPECT_TRUE(result_str == "1.2.3.4" || result_str == "::1.2.3.4")
+        << result_str;
+    if (result) {
+        freeaddrinfo(result);
+        result = nullptr;
+    }
+
+    dns.stopServer();
+}
+
 TEST_F(ResolverTest, MultidomainResolution) {
     std::vector<std::string> searchDomains = { "example1.com", "example2.com", "example3.com" };
     const char* listen_addr = "127.0.0.6";
