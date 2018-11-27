@@ -355,7 +355,7 @@ TEST_F(ResolverTest, GetHostByName_Binder) {
     ASSERT_TRUE(GetResolverInfo(&res_servers, &res_domains, &res_params, &res_stats));
     EXPECT_EQ(servers.size(), res_servers.size());
     EXPECT_EQ(domains.size(), res_domains.size());
-    ASSERT_EQ(INetd::RESOLVER_PARAMS_COUNT, mDefaultParams_Binder.size());
+    ASSERT_EQ(static_cast<size_t>(INetd::RESOLVER_PARAMS_COUNT), mDefaultParams_Binder.size());
     EXPECT_EQ(mDefaultParams_Binder[INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY],
             res_params.sample_validity);
     EXPECT_EQ(mDefaultParams_Binder[INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD],
@@ -735,7 +735,7 @@ TEST_F(ResolverTest, EmptySetup) {
     ASSERT_TRUE(GetResolverInfo(&res_servers, &res_domains, &res_params, &res_stats));
     EXPECT_EQ(0U, res_servers.size());
     EXPECT_EQ(0U, res_domains.size());
-    ASSERT_EQ(INetd::RESOLVER_PARAMS_COUNT, mDefaultParams_Binder.size());
+    ASSERT_EQ(static_cast<size_t>(INetd::RESOLVER_PARAMS_COUNT), mDefaultParams_Binder.size());
     EXPECT_EQ(mDefaultParams_Binder[INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY],
             res_params.sample_validity);
     EXPECT_EQ(mDefaultParams_Binder[INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD],

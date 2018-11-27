@@ -217,7 +217,11 @@ int TetherController::startTethering(int num_addrs, char **dhcp_ranges) {
             "/system/bin/dnsmasq",
             "--keep-in-foreground",
             "--no-resolv",
-            "--dhcp-ignore-names",
+            "--dhcp-host=wpad,set:Blacklist",
+            "--dhcp-host=isatap,set:Blacklist",
+            "--dhcp-host=autodiscovery,set:Blacklist",
+            "--dhcp-host=autoreconf,set:Blacklist",
+            "--dhcp-ignore-names=tag:Blacklist",
             "--no-poll",
             "--dhcp-authoritative",
             // TODO: pipe through metered status from ConnService
