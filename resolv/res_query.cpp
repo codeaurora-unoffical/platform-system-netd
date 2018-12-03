@@ -78,12 +78,13 @@
 #include <netinet/in.h>
 #include <sys/param.h>
 #include <sys/types.h>
-#include "resolv_cache.h"
-#include "resolv_private.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#include "resolv_cache.h"
+#include "resolv_private.h"
 
 /* Options.  Leave them on. */
 #ifndef DEBUG
@@ -126,11 +127,9 @@ again:
 #endif
 
     n = res_nmkquery(statp, QUERY, name, cl, type, NULL, 0, NULL, buf, sizeof(buf));
-#ifdef RES_USE_EDNS0
     if (n > 0 && (statp->_flags & RES_F_EDNS0ERR) == 0 &&
         (statp->options & (RES_USE_EDNS0 | RES_USE_DNSSEC)) != 0U)
         n = res_nopt(statp, n, buf, sizeof(buf), anslen);
-#endif
     if (n <= 0) {
 #ifdef DEBUG
         if (statp->options & RES_DEBUG) printf(";; res_query: mkquery failed\n");
@@ -140,7 +139,6 @@ again:
     }
     n = res_nsend(statp, buf, n, answer, anslen);
     if (n < 0) {
-#ifdef RES_USE_EDNS0
         /* if the query choked with EDNS0, retry without EDNS0 */
         if ((statp->options & (RES_USE_EDNS0 | RES_USE_DNSSEC)) != 0U &&
             ((oflags ^ statp->_flags) & RES_F_EDNS0ERR) != 0) {
@@ -148,7 +146,6 @@ again:
             if (statp->options & RES_DEBUG) printf(";; res_nquery: retry without EDNS0\n");
             goto again;
         }
-#endif
 #ifdef DEBUG
         if (statp->options & RES_DEBUG) printf(";; res_query: send error\n");
 #endif
@@ -273,7 +270,7 @@ int res_nsearch(res_state statp, const char* name, /* domain name */
             switch (statp->res_h_errno) {
                 case NO_DATA:
                     got_nodata++;
-                    /* FALLTHROUGH */
+                    break;
                 case HOST_NOT_FOUND:
                     /* keep trying */
                     break;
@@ -283,7 +280,7 @@ int res_nsearch(res_state statp, const char* name, /* domain name */
                         got_servfail++;
                         break;
                     }
-                    /* FALLTHROUGH */
+                    [[fallthrough]];
                 default:
                     /* anything else implies that we're done */
                     done++;

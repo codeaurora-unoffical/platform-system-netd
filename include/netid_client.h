@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 The Android Open Source Project
+ * Copyright (C) 2018 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,18 +14,18 @@
  * limitations under the License.
  */
 
-#include <algorithm>
+#ifndef NETD_CLIENT_NETID_H
+#define NETD_CLIENT_NETID_H
 
-#include "netdutils/Syscalls.h"
-#include "netdutils/UniqueFile.h"
+/*
+ * Passing NETID_UNSET as the netId causes system/netd/server/DnsProxyListener.cpp to
+ * fill in the appropriate default netId for the query.
+ */
+#define NETID_UNSET 0u
 
-namespace android {
-namespace netdutils {
+/*
+ * MARK_UNSET represents the default (i.e. unset) value for a socket mark.
+ */
+#define MARK_UNSET 0u
 
-void UniqueFileDtor::operator()(FILE* file) const {
-    const auto& sys = sSyscalls.get();
-    sys.fclose(file).ignoreError();
-}
-
-}  // namespace netdutils
-}  // namespace android
+#endif  // NETD_CLIENT_NETID_H

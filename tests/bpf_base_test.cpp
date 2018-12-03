@@ -35,6 +35,7 @@
 
 #include "bpf/BpfMap.h"
 #include "bpf/BpfUtils.h"
+#include "netdbpf/bpf_shared.h"
 
 using android::base::unique_fd;
 using android::netdutils::status::ok;

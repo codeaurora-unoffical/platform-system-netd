@@ -59,6 +59,7 @@ class MockNetlinkListener : public NetlinkListenerInterface {
     MOCK_METHOD2(subscribe, netdutils::Status(uint16_t type, const DispatchFn& fn));
     MOCK_METHOD1(unsubscribe, netdutils::Status(uint16_t type));
     MOCK_METHOD0(join, void());
+    MOCK_METHOD1(registerSkErrorHandler, void(const SkErrorHandler& handler));
 };
 
 class NFLogListenerTest : public testing::Test {
@@ -81,7 +82,7 @@ class NFLogListenerTest : public testing::Test {
     void subscribe(uint16_t type, const NFLogListenerInterface::DispatchFn& fn) {
         // Two sends for cfgCmdBind() & cfgMode(), one send at destruction time for cfgCmdUnbind()
         EXPECT_CALL(*mNLListener, send(_)).Times(Exactly(3)).WillRepeatedly(Invoke(sendOk));
-        mListener->subscribe(type, fn);
+        EXPECT_OK(mListener->subscribe(type, fn));
     }
 
     void sendEmptyMsg(uint16_t type) {

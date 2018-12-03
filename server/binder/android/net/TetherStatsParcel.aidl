@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 The Android Open Source Project
+ * Copyright (C) 2018 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,18 +14,17 @@
  * limitations under the License.
  */
 
-#include <algorithm>
+package android.net;
 
-#include "netdutils/Syscalls.h"
-#include "netdutils/UniqueFile.h"
-
-namespace android {
-namespace netdutils {
-
-void UniqueFileDtor::operator()(FILE* file) const {
-    const auto& sys = sSyscalls.get();
-    sys.fclose(file).ignoreError();
+/**
+ * The statistics of tethering interface
+ *
+ * {@hide}
+ */
+parcelable TetherStatsParcel {
+    @utf8InCpp String iface;
+    long rxBytes;
+    long rxPackets;
+    long txBytes;
+    long txPackets;
 }
-
-}  // namespace netdutils
-}  // namespace android

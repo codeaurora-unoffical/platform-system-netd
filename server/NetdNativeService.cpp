@@ -16,6 +16,7 @@
 
 #define LOG_TAG "Netd"
 
+#include <cinttypes>
 #include <set>
 #include <tuple>
 #include <vector>
@@ -39,13 +40,15 @@
 #include "InterfaceController.h"
 #include "NetdConstants.h"
 #include "NetdNativeService.h"
+#include "Permission.h"
 #include "Process.h"
 #include "RouteController.h"
 #include "SockDiag.h"
 #include "UidRanges.h"
+#include "netid_client.h"  // NETID_UNSET
 
 using android::base::StringPrintf;
-using android::os::PersistableBundle;
+using android::net::TetherStatsParcel;
 
 namespace android {
 namespace net {
@@ -100,6 +103,13 @@ binder::Status checkPermission(const char *permission) {
     std::lock_guard _lock(lock);
 
 #define NETD_BIG_LOCK_RPC(permission) NETD_LOCKING_RPC((permission), gBigNetdLock)
+
+binder::Status asBinderStatus(const netdutils::Status& status) {
+    if (isOk(status)) {
+        return binder::Status::ok();
+    }
+    return binder::Status::fromServiceSpecificError(status.code(), status.msg().c_str());
+}
 
 inline binder::Status statusFromErrcode(int ret) {
     if (ret) {
@@ -312,11 +322,10 @@ binder::Status NetdNativeService::bandwidthRemoveNiceApp(int32_t uid) {
     return statusFromErrcode(res);
 }
 
-binder::Status NetdNativeService::networkCreatePhysical(int32_t netId,
-        const std::string& permission) {
+binder::Status NetdNativeService::networkCreatePhysical(int32_t netId, int32_t permission) {
     ENFORCE_PERMISSION(CONNECTIVITY_INTERNAL);
     auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(netId).arg(permission);
-    int ret = gCtls->netCtrl.createPhysicalNetwork(netId, stringToPermission(permission.c_str()));
+    int ret = gCtls->netCtrl.createPhysicalNetwork(netId, convertPermission(permission));
     gLog.log(entry.returns(ret).withAutomaticDuration());
     return statusFromErrcode(ret);
 }
@@ -489,37 +498,68 @@ binder::Status NetdNativeService::tetherApplyDnsInterfaces(bool *ret) {
 
 namespace {
 
-void tetherAddStats(PersistableBundle *bundle, const TetherController::TetherStats& stats) {
-    String16 iface = String16(stats.extIface.c_str());
-    std::vector<int64_t> statsVector(INetd::TETHER_STATS_ARRAY_SIZE);
-
-    bundle->getLongVector(iface, &statsVector);
-    if (statsVector.size() == 0) {
-        for (int i = 0; i < INetd::TETHER_STATS_ARRAY_SIZE; i++) statsVector.push_back(0);
+void tetherAddStatsByInterface(TetherController::TetherStats* tetherStatsParcel,
+                               const TetherController::TetherStats& tetherStats) {
+    if (tetherStatsParcel->extIface == tetherStats.extIface) {
+        tetherStatsParcel->rxBytes += tetherStats.rxBytes;
+        tetherStatsParcel->rxPackets += tetherStats.rxPackets;
+        tetherStatsParcel->txBytes += tetherStats.txBytes;
+        tetherStatsParcel->txPackets += tetherStats.txPackets;
     }
+}
 
-    statsVector[INetd::TETHER_STATS_RX_BYTES]   += stats.rxBytes;
-    statsVector[INetd::TETHER_STATS_RX_PACKETS] += stats.rxPackets;
-    statsVector[INetd::TETHER_STATS_TX_BYTES]   += stats.txBytes;
-    statsVector[INetd::TETHER_STATS_TX_PACKETS] += stats.txPackets;
+TetherStatsParcel toTetherStatsParcel(const TetherController::TetherStats& stats) {
+    TetherStatsParcel result;
+    result.iface = stats.extIface;
+    result.rxBytes = stats.rxBytes;
+    result.rxPackets = stats.rxPackets;
+    result.txBytes = stats.txBytes;
+    result.txPackets = stats.txPackets;
+    return result;
+}
 
-    bundle->putLongVector(iface, statsVector);
+void setTetherStatsParcelVecByInterface(std::vector<TetherStatsParcel>* tetherStatsVec,
+                                        const TetherController::TetherStatsList& statsList) {
+    std::map<std::string, TetherController::TetherStats> statsMap;
+    for (const auto& stats : statsList) {
+        auto iter = statsMap.find(stats.extIface);
+        if (iter != statsMap.end()) {
+            tetherAddStatsByInterface(&(iter->second), stats);
+        } else {
+            statsMap.insert(
+                    std::pair<std::string, TetherController::TetherStats>(stats.extIface, stats));
+        }
+    }
+    for (auto iter = statsMap.begin(); iter != statsMap.end(); iter++) {
+        tetherStatsVec->push_back(toTetherStatsParcel(iter->second));
+    }
+}
+
+std::vector<std::string> tetherStatsParcelVecToStringVec(std::vector<TetherStatsParcel>* tVec) {
+    std::vector<std::string> result;
+    for (const auto& t : *tVec) {
+        result.push_back(StringPrintf("%s:%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64,
+                                      t.iface.c_str(), t.rxBytes, t.rxPackets, t.txBytes,
+                                      t.txPackets));
+    }
+    return result;
 }
 
 }  // namespace
 
-binder::Status NetdNativeService::tetherGetStats(PersistableBundle *bundle) {
+binder::Status NetdNativeService::tetherGetStats(
+        std::vector<TetherStatsParcel>* tetherStatsParcelVec) {
     NETD_LOCKING_RPC(NETWORK_STACK, gCtls->tetherCtrl.lock);
+
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
 
     const auto& statsList = gCtls->tetherCtrl.getTetherStats();
     if (!isOk(statsList)) {
         return asBinderStatus(statsList);
     }
-
-    for (const auto& stats : statsList.value()) {
-        tetherAddStats(bundle, stats);
-    }
-
+    setTetherStatsParcelVecByInterface(tetherStatsParcelVec, statsList.value());
+    auto statsResults = tetherStatsParcelVecToStringVec(tetherStatsParcelVec);
+    gLog.log(entry.returns(base::Join(statsResults, ";")).withAutomaticDuration());
     return binder::Status::ok();
 }
 
@@ -1046,6 +1086,176 @@ binder::Status NetdNativeService::tetherDnsList(std::vector<std::string>* dnsLis
         dnsList->push_back(fwdr);
     }
     gLog.log(entry.returns(true).withAutomaticDuration());
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::networkAddRoute(int32_t netId, const std::string& ifName,
+                                                  const std::string& destination,
+                                                  const std::string& nextHop) {
+    // Public methods of NetworkController are thread-safe.
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry()
+                         .prettyFunction(__PRETTY_FUNCTION__)
+                         .arg(netId)
+                         .arg(ifName)
+                         .arg(destination)
+                         .arg(nextHop);
+    bool legacy = false;
+    uid_t uid = 0;  // UID is only meaningful for legacy routes.
+    int res = gCtls->netCtrl.addRoute(netId, ifName.c_str(), destination.c_str(),
+                                      nextHop.empty() ? nullptr : nextHop.c_str(), legacy, uid);
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::networkRemoveRoute(int32_t netId, const std::string& ifName,
+                                                     const std::string& destination,
+                                                     const std::string& nextHop) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry()
+                         .prettyFunction(__PRETTY_FUNCTION__)
+                         .arg(netId)
+                         .arg(ifName)
+                         .arg(destination)
+                         .arg(nextHop);
+    bool legacy = false;
+    uid_t uid = 0;  // UID is only meaningful for legacy routes.
+    int res = gCtls->netCtrl.removeRoute(netId, ifName.c_str(), destination.c_str(),
+                                         nextHop.empty() ? nullptr : nextHop.c_str(), legacy, uid);
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::networkAddLegacyRoute(int32_t netId, const std::string& ifName,
+                                                        const std::string& destination,
+                                                        const std::string& nextHop, int32_t uid) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry()
+                         .prettyFunction(__PRETTY_FUNCTION__)
+                         .arg(netId)
+                         .arg(ifName)
+                         .arg(destination)
+                         .arg(nextHop)
+                         .arg(uid);
+    bool legacy = true;
+    int res = gCtls->netCtrl.addRoute(netId, ifName.c_str(), destination.c_str(),
+                                      nextHop.empty() ? nullptr : nextHop.c_str(), legacy,
+                                      (uid_t) uid);
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::networkRemoveLegacyRoute(int32_t netId, const std::string& ifName,
+                                                           const std::string& destination,
+                                                           const std::string& nextHop,
+                                                           int32_t uid) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry()
+                         .prettyFunction(__PRETTY_FUNCTION__)
+                         .arg(netId)
+                         .arg(ifName)
+                         .arg(destination)
+                         .arg(nextHop)
+                         .arg(uid);
+    bool legacy = true;
+    int res = gCtls->netCtrl.removeRoute(netId, ifName.c_str(), destination.c_str(),
+                                         nextHop.empty() ? nullptr : nextHop.c_str(), legacy,
+                                         (uid_t) uid);
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::networkGetDefault(int32_t* netId) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
+    *netId = gCtls->netCtrl.getDefaultNetwork();
+    gLog.log(entry.returns(*netId).withAutomaticDuration());
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::networkSetDefault(int32_t netId) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(netId);
+    int res = gCtls->netCtrl.setDefaultNetwork(netId);
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::networkClearDefault() {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
+    unsigned netId = NETID_UNSET;
+    int res = gCtls->netCtrl.setDefaultNetwork(netId);
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+std::vector<uid_t> NetdNativeService::intsToUids(const std::vector<int32_t>& intUids) {
+    return {begin(intUids), end(intUids)};
+}
+
+Permission NetdNativeService::convertPermission(int32_t permission) {
+    switch (permission) {
+        case INetd::PERMISSION_NETWORK:
+            return Permission::PERMISSION_NETWORK;
+        case INetd::PERMISSION_SYSTEM:
+            return Permission::PERMISSION_SYSTEM;
+        default:
+            return Permission::PERMISSION_NONE;
+    }
+}
+
+binder::Status NetdNativeService::networkSetPermissionForNetwork(int32_t netId,
+                                                                 int32_t permission) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(netId).arg(permission);
+    std::vector<unsigned> netIds = {(unsigned) netId};
+    int res = gCtls->netCtrl.setPermissionForNetworks(convertPermission(permission), netIds);
+    gLog.log(entry.returns(res).withAutomaticDuration());
+    return statusFromErrcode(res);
+}
+
+binder::Status NetdNativeService::networkSetPermissionForUser(int32_t permission,
+                                                              const std::vector<int32_t>& uids) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(permission).arg(uids);
+    gCtls->netCtrl.setPermissionForUsers(convertPermission(permission), intsToUids(uids));
+    gLog.log(entry.withAutomaticDuration());
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::networkClearPermissionForUser(const std::vector<int32_t>& uids) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(uids);
+    Permission permission = Permission::PERMISSION_NONE;
+    gCtls->netCtrl.setPermissionForUsers(permission, intsToUids(uids));
+    gLog.log(entry.withAutomaticDuration());
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::NetdNativeService::networkSetProtectAllow(int32_t uid) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(uid);
+    std::vector<uid_t> uids = {(uid_t) uid};
+    gCtls->netCtrl.allowProtect(uids);
+    gLog.log(entry.withAutomaticDuration());
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::networkSetProtectDeny(int32_t uid) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(uid);
+    std::vector<uid_t> uids = {(uid_t) uid};
+    gCtls->netCtrl.denyProtect(uids);
+    gLog.log(entry.withAutomaticDuration());
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::networkCanProtect(int32_t uid, bool* ret) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(uid);
+    *ret = gCtls->netCtrl.canProtect((uid_t) uid);
+    gLog.log(entry.returns(*ret).withAutomaticDuration());
     return binder::Status::ok();
 }
 

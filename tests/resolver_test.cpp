@@ -38,17 +38,18 @@
 // TODO: make this dynamic and stop depending on implementation details.
 #define TEST_NETID 30
 
-#include "resolv_netid.h"  // NETID_UNSET
 #include "NetdClient.h"
+#include "netid_client.h"  // NETID_UNSET
 
 #include <gtest/gtest.h>
+#include <netd_resolv/params.h>
+#include <netd_resolv/resolv.h>  // android_getaddrinfofornet()
 
 #include <utils/Log.h>
 
 #include "dns_responder.h"
 #include "dns_responder_client.h"
 #include "dns_tls_frontend.h"
-#include "resolv_params.h"
 
 #include "NetdConstants.h"
 #include "ResolverStats.h"
@@ -975,8 +976,8 @@ TEST_F(ResolverTest, GetHostByName_TlsBroken) {
         .sin_port = htons(853),
     };
     ASSERT_TRUE(inet_pton(AF_INET, listen_addr, &tlsServer.sin_addr));
-    enableSockopt(s, SOL_SOCKET, SO_REUSEPORT);
-    enableSockopt(s, SOL_SOCKET, SO_REUSEADDR);
+    ASSERT_TRUE(enableSockopt(s, SOL_SOCKET, SO_REUSEPORT).ok());
+    ASSERT_TRUE(enableSockopt(s, SOL_SOCKET, SO_REUSEADDR).ok());
     ASSERT_FALSE(bind(s, reinterpret_cast<struct sockaddr*>(&tlsServer), sizeof(tlsServer)));
     ASSERT_FALSE(listen(s, 1));
 
