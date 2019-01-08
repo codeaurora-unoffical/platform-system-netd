@@ -25,7 +25,8 @@
 #include <android-base/thread_annotations.h>
 #include <netdutils/Slice.h>
 
-#include "dns/DnsTlsServer.h"
+#include "DnsTlsServer.h"
+#include "params.h"
 
 namespace android {
 namespace net {
@@ -35,7 +36,7 @@ using netdutils::Slice;
 // Keeps track of queries and responses.  This class matches responses with queries.
 // All methods are thread-safe and non-blocking.
 class DnsTlsQueryMap {
-public:
+  public:
     struct Query {
         // The new ID number assigned to this query.
         uint16_t newId;

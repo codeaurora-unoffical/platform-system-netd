@@ -10,7 +10,6 @@ cc_benchmark {
         "libnetd_client",
         "libnetdaidl",
         "libnetdutils",
-        "netd_aidl_interface-cpp",
     ],
     static_libs: [
         "libnetd_test_dnsresponder",
@@ -40,7 +39,7 @@ cc_benchmark {
     defaults: ["netd_defaults"],
     shared_libs: [
         "libbase",
-        "libbpf",
+        "libbpf_android",
         "libnetdutils",
     ],
     static_libs: [

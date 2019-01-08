@@ -23,7 +23,6 @@
 #include <netdutils/Log.h>
 
 #include "android/net/BnNetd.h"
-#include "android/net/UidRange.h"
 
 namespace android {
 namespace net {
@@ -40,6 +39,12 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
     binder::Status firewallReplaceUidChain(
             const std::string& chainName, bool isWhitelist,
             const std::vector<int32_t>& uids, bool *ret) override;
+    binder::Status firewallSetFirewallType(int32_t firewallType) override;
+    binder::Status firewallSetInterfaceRule(const std::string& ifName,
+                                            int32_t firewallRule) override;
+    binder::Status firewallSetUidRule(int32_t childChain, int32_t uid,
+                                      int32_t firewallRule) override;
+    binder::Status firewallEnableChildChain(int32_t childChain, bool enable) override;
 
     // Bandwidth control commands.
     binder::Status bandwidthEnableDataSaver(bool enable, bool *ret) override;
@@ -61,12 +66,12 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
     binder::Status networkAddInterface(int32_t netId, const std::string& iface) override;
     binder::Status networkRemoveInterface(int32_t netId, const std::string& iface) override;
 
-    binder::Status networkAddUidRanges(int32_t netId, const std::vector<UidRange>& uids)
-            override;
-    binder::Status networkRemoveUidRanges(int32_t netId, const std::vector<UidRange>& uids)
-            override;
-    binder::Status networkRejectNonSecureVpn(bool enable, const std::vector<UidRange>& uids)
-            override;
+    binder::Status networkAddUidRanges(int32_t netId,
+                                       const std::vector<UidRangeParcel>& uids) override;
+    binder::Status networkRemoveUidRanges(int32_t netId,
+                                          const std::vector<UidRangeParcel>& uids) override;
+    binder::Status networkRejectNonSecureVpn(bool enable,
+                                             const std::vector<UidRangeParcel>& uids) override;
     binder::Status networkAddRoute(int32_t netId, const std::string& ifName,
                                    const std::string& destination,
                                    const std::string& nextHop) override;
@@ -92,8 +97,8 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
     binder::Status networkCanProtect(int32_t uid, bool* ret) override;
 
     // SOCK_DIAG commands.
-    binder::Status socketDestroy(const std::vector<UidRange>& uids,
-            const std::vector<int32_t>& skipUids) override;
+    binder::Status socketDestroy(const std::vector<UidRangeParcel>& uids,
+                                 const std::vector<int32_t>& skipUids) override;
 
     // Resolver commands.
     binder::Status setResolverConfiguration(int32_t netId, const std::vector<std::string>& servers,
@@ -132,6 +137,15 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
             const std::string &addrString, int prefixLength) override;
     binder::Status interfaceDelAddress(const std::string &ifName,
             const std::string &addrString, int prefixLength) override;
+    binder::Status interfaceGetList(std::vector<std::string>* interfaceListResult) override;
+    binder::Status interfaceGetCfg(const std::string& ifName,
+                                   InterfaceConfigurationParcel* interfaceGetCfgResult) override;
+    binder::Status interfaceSetCfg(const InterfaceConfigurationParcel& cfg) override;
+    binder::Status interfaceSetIPv6PrivacyExtensions(const std::string& ifName,
+                                                     bool enable) override;
+    binder::Status interfaceClearAddrs(const std::string& ifName) override;
+    binder::Status interfaceSetEnableIPv6(const std::string& ifName, bool enable) override;
+    binder::Status interfaceSetMtu(const std::string& ifName, int32_t mtuValue) override;
 
     binder::Status getProcSysNet(int32_t ipversion, int32_t which, const std::string& ifname,
                                  const std::string& parameter, std::string* value) override;
@@ -249,6 +263,8 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
   private:
     std::vector<uid_t> intsToUids(const std::vector<int32_t>& intUids);
     Permission convertPermission(int32_t permission);
+    static FirewallRule parseRule(int32_t firewallRule);
+    static ChildChain parseChildChain(int32_t childChain);
 };
 
 }  // namespace net

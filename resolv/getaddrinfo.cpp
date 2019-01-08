@@ -88,7 +88,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -100,12 +99,6 @@
 #include "netd_resolv/resolv.h"
 #include "resolv_cache.h"
 #include "resolv_private.h"
-
-typedef union sockaddr_union {
-    struct sockaddr generic;
-    struct sockaddr_in in;
-    struct sockaddr_in6 in6;
-} sockaddr_union;
 
 #define ANY 0
 
@@ -134,24 +127,23 @@ struct explore {
     int e_af;
     int e_socktype;
     int e_protocol;
-    const char* e_protostr;
     int e_wild;
 #define WILD_AF(ex) ((ex)->e_wild & 0x01)
 #define WILD_SOCKTYPE(ex) ((ex)->e_wild & 0x02)
 #define WILD_PROTOCOL(ex) ((ex)->e_wild & 0x04)
 };
 
-static const struct explore explore[] = {
-        {PF_INET6, SOCK_DGRAM, IPPROTO_UDP, "udp", 0x07},
-        {PF_INET6, SOCK_STREAM, IPPROTO_TCP, "tcp", 0x07},
-        {PF_INET6, SOCK_RAW, ANY, NULL, 0x05},
-        {PF_INET, SOCK_DGRAM, IPPROTO_UDP, "udp", 0x07},
-        {PF_INET, SOCK_STREAM, IPPROTO_TCP, "tcp", 0x07},
-        {PF_INET, SOCK_RAW, ANY, NULL, 0x05},
-        {PF_UNSPEC, SOCK_DGRAM, IPPROTO_UDP, "udp", 0x07},
-        {PF_UNSPEC, SOCK_STREAM, IPPROTO_TCP, "tcp", 0x07},
-        {PF_UNSPEC, SOCK_RAW, ANY, NULL, 0x05},
-        {-1, 0, 0, NULL, 0},
+static const struct explore explore_options[] = {
+        {PF_INET6, SOCK_DGRAM, IPPROTO_UDP, 0x07},
+        {PF_INET6, SOCK_STREAM, IPPROTO_TCP, 0x07},
+        {PF_INET6, SOCK_RAW, ANY, 0x05},
+        {PF_INET, SOCK_DGRAM, IPPROTO_UDP, 0x07},
+        {PF_INET, SOCK_STREAM, IPPROTO_TCP, 0x07},
+        {PF_INET, SOCK_RAW, ANY, 0x05},
+        {PF_UNSPEC, SOCK_DGRAM, IPPROTO_UDP, 0x07},
+        {PF_UNSPEC, SOCK_STREAM, IPPROTO_TCP, 0x07},
+        {PF_UNSPEC, SOCK_RAW, ANY, 0x05},
+        {-1, 0, 0, 0},
 };
 
 #define PTON_MAX 16
@@ -195,9 +187,10 @@ static struct addrinfo* _gethtent(FILE**, const char*, const struct addrinfo*);
 static bool files_getaddrinfo(const char* name, const addrinfo* pai, addrinfo** res);
 static int _find_src_addr(const struct sockaddr*, struct sockaddr*, unsigned, uid_t);
 
-static int res_queryN(const char*, struct res_target*, res_state);
-static int res_searchN(const char*, struct res_target*, res_state);
-static int res_querydomainN(const char*, const char*, struct res_target*, res_state);
+static int res_queryN(const char* name, res_target* target, res_state res, int* ai_error);
+static int res_searchN(const char* name, res_target* target, res_state res, int* ai_error);
+static int res_querydomainN(const char* name, const char* domain, res_target* target, res_state res,
+                            int* ai_error);
 
 static const char* const ai_errlist[] = {
         "Success",
@@ -235,20 +228,6 @@ static const char* const ai_errlist[] = {
         /* external reference: error and label free */ \
         error = get_port((ai), (serv), 0);             \
         if (error != 0) goto free;                     \
-    } while (0)
-
-#define GET_CANONNAME(ai, str)                              \
-    do {                                                    \
-        /* external reference: pai, error and label free */ \
-        error = get_canonname(pai, (ai), (str));            \
-        if (error != 0) goto free;                          \
-    } while (0)
-
-#define ERR(err)                                       \
-    do {                                               \
-        /* external reference: error, and label bad */ \
-        error = (err);                                 \
-        goto bad;                                      \
     } while (0)
 
 #define MATCH_FAMILY(x, y, w) \
@@ -300,8 +279,8 @@ static int _have_ipv6(unsigned mark, uid_t uid) {
             .sin6_family = AF_INET6,
             .sin6_addr.s6_addr = {// 2000::
                                   0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
-    sockaddr_union addr = {.in6 = sin6_test};
-    return _find_src_addr(&addr.generic, NULL, mark, uid) == 1;
+    sockaddr_union addr = {.sin6 = sin6_test};
+    return _find_src_addr(&addr.sa, NULL, mark, uid) == 1;
 }
 
 static int _have_ipv4(unsigned mark, uid_t uid) {
@@ -309,8 +288,8 @@ static int _have_ipv4(unsigned mark, uid_t uid) {
             .sin_family = AF_INET,
             .sin_addr.s_addr = __constant_htonl(0x08080808L)  // 8.8.8.8
     };
-    sockaddr_union addr = {.in = sin_test};
-    return _find_src_addr(&addr.generic, NULL, mark, uid) == 1;
+    sockaddr_union addr = {.sin = sin_test};
+    return _find_src_addr(&addr.sa, NULL, mark, uid) == 1;
 }
 
 bool readBE32(FILE* fp, int32_t* result) {
@@ -322,29 +301,26 @@ bool readBE32(FILE* fp, int32_t* result) {
     return true;
 }
 
-int getaddrinfo(const char* hostname, const char* servname, const struct addrinfo* hints,
-                struct addrinfo** res) {
-    return android_getaddrinfofornet(hostname, servname, hints, NETID_UNSET, MARK_UNSET, res);
-}
-
-int android_getaddrinfofornet(const char* hostname, const char* servname,
-                              const struct addrinfo* hints, unsigned netid, unsigned mark,
-                              struct addrinfo** res) {
-    struct android_net_context netcontext = {
-            .app_netid = netid,
-            .app_mark = mark,
-            .dns_netid = netid,
-            .dns_mark = mark,
+// Internal version of getaddrinfo(), but limited to AI_NUMERICHOST.
+// NOTE: also called by resolv_set_nameservers_for_net().
+int getaddrinfo_numeric(const char* hostname, const char* servname, addrinfo hints,
+                        addrinfo** result) {
+    hints.ai_flags = AI_NUMERICHOST;
+    const android_net_context netcontext = {
+            .app_netid = NETID_UNSET,
+            .app_mark = MARK_UNSET,
+            .dns_netid = NETID_UNSET,
+            .dns_mark = MARK_UNSET,
             .uid = NET_CONTEXT_INVALID_UID,
     };
-    return android_getaddrinfofornetcontext(hostname, servname, hints, &netcontext, res);
+    return android_getaddrinfofornetcontext(hostname, servname, &hints, &netcontext, result);
 }
 
 int android_getaddrinfofornetcontext(const char* hostname, const char* servname,
                                      const struct addrinfo* hints,
                                      const struct android_net_context* netcontext,
                                      struct addrinfo** res) {
-    struct addrinfo sentinel;
+    struct addrinfo sentinel = {};
     struct addrinfo* cur;
     int error = 0;
     struct addrinfo ai;
@@ -357,7 +333,6 @@ int android_getaddrinfofornetcontext(const char* hostname, const char* servname,
     /* hints is allowed to be NULL */
     assert(res != NULL);
     assert(netcontext != NULL);
-    memset(&sentinel, 0, sizeof(sentinel));
     cur = &sentinel;
     pai = &ai;
     pai->ai_flags = 0;
@@ -368,137 +343,149 @@ int android_getaddrinfofornetcontext(const char* hostname, const char* servname,
     pai->ai_canonname = NULL;
     pai->ai_addr = NULL;
     pai->ai_next = NULL;
-
-    if (hostname == NULL && servname == NULL) return EAI_NONAME;
-    if (hints) {
-        /* error check for hints */
-        if (hints->ai_addrlen || hints->ai_canonname || hints->ai_addr || hints->ai_next)
-            ERR(EAI_BADHINTS); /* xxx */
-        if (hints->ai_flags & ~AI_MASK) ERR(EAI_BADFLAGS);
-        switch (hints->ai_family) {
-            case PF_UNSPEC:
-            case PF_INET:
-            case PF_INET6:
-                break;
-            default:
-                ERR(EAI_FAMILY);
+    do {
+        if (hostname == NULL && servname == NULL) {
+            error = EAI_NONAME;
+            break;
         }
-        memcpy(pai, hints, sizeof(*pai));
+        if (hints) {
+            /* error check for hints */
+            if (hints->ai_addrlen || hints->ai_canonname || hints->ai_addr || hints->ai_next) {
+                error = EAI_BADHINTS;
+                break;
+            }
+            if (hints->ai_flags & ~AI_MASK) {
+                error = EAI_BADFLAGS;
+                break;
+            }
 
-        /*
-         * if both socktype/protocol are specified, check if they
-         * are meaningful combination.
-         */
-        if (pai->ai_socktype != ANY && pai->ai_protocol != ANY) {
-            for (ex = explore; ex->e_af >= 0; ex++) {
-                if (pai->ai_family != ex->e_af) continue;
-                if (ex->e_socktype == ANY) continue;
-                if (ex->e_protocol == ANY) continue;
-                if (pai->ai_socktype == ex->e_socktype && pai->ai_protocol != ex->e_protocol) {
-                    ERR(EAI_BADHINTS);
+            if (!(hints->ai_family == PF_UNSPEC || hints->ai_family == PF_INET ||
+                  hints->ai_family == PF_INET6)) {
+                error = EAI_FAMILY;
+                break;
+            }
+            *pai = *hints;
+
+            /*
+             * if both socktype/protocol are specified, check if they
+             * are meaningful combination.
+             */
+            if (pai->ai_socktype != ANY && pai->ai_protocol != ANY) {
+                for (ex = explore_options; ex->e_af >= 0; ex++) {
+                    if (pai->ai_family != ex->e_af) continue;
+                    if (ex->e_socktype == ANY) continue;
+                    if (ex->e_protocol == ANY) continue;
+                    if (pai->ai_socktype == ex->e_socktype && pai->ai_protocol != ex->e_protocol) {
+                        error = EAI_BADHINTS;
+                        break;
+                    }
                 }
+                if (error) break;
             }
         }
-    }
 
-    /*
-     * check for special cases.  (1) numeric servname is disallowed if
-     * socktype/protocol are left unspecified. (2) servname is disallowed
-     * for raw and other inet{,6} sockets.
-     */
-    if (MATCH_FAMILY(pai->ai_family, PF_INET, 1)
-        || MATCH_FAMILY(pai->ai_family, PF_INET6, 1)
-    ) {
-        ai0 = *pai; /* backup *pai */
+        /*
+         * check for special cases.  (1) numeric servname is disallowed if
+         * socktype/protocol are left unspecified. (2) servname is disallowed
+         * for raw and other inet{,6} sockets.
+         */
+        if (MATCH_FAMILY(pai->ai_family, PF_INET, 1)
+            || MATCH_FAMILY(pai->ai_family, PF_INET6, 1)
+        ) {
+            ai0 = *pai; /* backup *pai */
 
-        if (pai->ai_family == PF_UNSPEC) {
-            pai->ai_family = PF_INET6;
-        }
-        error = get_portmatch(pai, servname);
-        if (error) ERR(error);
+            if (pai->ai_family == PF_UNSPEC) {
+                pai->ai_family = PF_INET6;
+            }
+            error = get_portmatch(pai, servname);
+            if (error) break;
 
-        *pai = ai0;
-    }
-
-    ai0 = *pai;
-
-    /* NULL hostname, or numeric hostname */
-    for (ex = explore; ex->e_af >= 0; ex++) {
-        *pai = ai0;
-
-        /* PF_UNSPEC entries are prepared for DNS queries only */
-        if (ex->e_af == PF_UNSPEC) continue;
-
-        if (!MATCH_FAMILY(pai->ai_family, ex->e_af, WILD_AF(ex))) continue;
-        if (!MATCH(pai->ai_socktype, ex->e_socktype, WILD_SOCKTYPE(ex))) continue;
-        if (!MATCH(pai->ai_protocol, ex->e_protocol, WILD_PROTOCOL(ex))) continue;
-
-        if (pai->ai_family == PF_UNSPEC) pai->ai_family = ex->e_af;
-        if (pai->ai_socktype == ANY && ex->e_socktype != ANY) pai->ai_socktype = ex->e_socktype;
-        if (pai->ai_protocol == ANY && ex->e_protocol != ANY) pai->ai_protocol = ex->e_protocol;
-
-        if (hostname == NULL)
-            error = explore_null(pai, servname, &cur->ai_next);
-        else
-            error = explore_numeric_scope(pai, hostname, servname, &cur->ai_next);
-
-        if (error) goto free;
-
-        while (cur->ai_next) cur = cur->ai_next;
-    }
-
-    /*
-     * XXX
-     * If numeric representation of AF1 can be interpreted as FQDN
-     * representation of AF2, we need to think again about the code below.
-     */
-    if (sentinel.ai_next) goto good;
-
-    if (hostname == NULL) ERR(EAI_NODATA);
-    if (pai->ai_flags & AI_NUMERICHOST) ERR(EAI_NONAME);
-
-    /*
-     * hostname as alphabetical name.
-     * we would like to prefer AF_INET6 than AF_INET, so we'll make a
-     * outer loop by AFs.
-     */
-    for (ex = explore; ex->e_af >= 0; ex++) {
-        *pai = ai0;
-
-        /* require exact match for family field */
-        if (pai->ai_family != ex->e_af) continue;
-
-        if (!MATCH(pai->ai_socktype, ex->e_socktype, WILD_SOCKTYPE(ex))) {
-            continue;
-        }
-        if (!MATCH(pai->ai_protocol, ex->e_protocol, WILD_PROTOCOL(ex))) {
-            continue;
+            *pai = ai0;
         }
 
-        if (pai->ai_socktype == ANY && ex->e_socktype != ANY) pai->ai_socktype = ex->e_socktype;
-        if (pai->ai_protocol == ANY && ex->e_protocol != ANY) pai->ai_protocol = ex->e_protocol;
+        ai0 = *pai;
 
-        error = explore_fqdn(pai, hostname, servname, &cur->ai_next, netcontext);
+        /* NULL hostname, or numeric hostname */
+        for (ex = explore_options; ex->e_af >= 0; ex++) {
+            *pai = ai0;
 
-        while (cur && cur->ai_next) cur = cur->ai_next;
-    }
+            /* PF_UNSPEC entries are prepared for DNS queries only */
+            if (ex->e_af == PF_UNSPEC) continue;
 
-    /* XXX */
-    if (sentinel.ai_next) error = 0;
+            if (!MATCH_FAMILY(pai->ai_family, ex->e_af, WILD_AF(ex))) continue;
+            if (!MATCH(pai->ai_socktype, ex->e_socktype, WILD_SOCKTYPE(ex))) continue;
+            if (!MATCH(pai->ai_protocol, ex->e_protocol, WILD_PROTOCOL(ex))) continue;
 
-    if (error) goto free;
-    if (error == 0) {
+            if (pai->ai_family == PF_UNSPEC) pai->ai_family = ex->e_af;
+            if (pai->ai_socktype == ANY && ex->e_socktype != ANY) pai->ai_socktype = ex->e_socktype;
+            if (pai->ai_protocol == ANY && ex->e_protocol != ANY) pai->ai_protocol = ex->e_protocol;
+
+            if (hostname == NULL)
+                error = explore_null(pai, servname, &cur->ai_next);
+            else
+                error = explore_numeric_scope(pai, hostname, servname, &cur->ai_next);
+
+            if (error) break;
+
+            while (cur->ai_next) cur = cur->ai_next;
+        }
+        if (error) break;
+
+        /*
+         * XXX
+         * If numeric representation of AF1 can be interpreted as FQDN
+         * representation of AF2, we need to think again about the code below.
+         */
+        if (sentinel.ai_next) break;
+
+        if (hostname == NULL) {
+            error = EAI_NODATA;
+            break;
+        }
+        if (pai->ai_flags & AI_NUMERICHOST) {
+            error = EAI_NONAME;
+            break;
+        }
+
+        /*
+         * hostname as alphabetical name.
+         * we would like to prefer AF_INET6 than AF_INET, so we'll make a
+         * outer loop by AFs.
+         */
+        for (ex = explore_options; ex->e_af >= 0; ex++) {
+            *pai = ai0;
+
+            /* require exact match for family field */
+            if (pai->ai_family != ex->e_af) continue;
+
+            if (!MATCH(pai->ai_socktype, ex->e_socktype, WILD_SOCKTYPE(ex))) {
+                continue;
+            }
+            if (!MATCH(pai->ai_protocol, ex->e_protocol, WILD_PROTOCOL(ex))) {
+                continue;
+            }
+
+            if (pai->ai_socktype == ANY && ex->e_socktype != ANY) pai->ai_socktype = ex->e_socktype;
+            if (pai->ai_protocol == ANY && ex->e_protocol != ANY) pai->ai_protocol = ex->e_protocol;
+
+            error = explore_fqdn(pai, hostname, servname, &cur->ai_next, netcontext);
+
+            while (cur->ai_next) cur = cur->ai_next;
+        }
+
         if (sentinel.ai_next) {
-        good:
-            *res = sentinel.ai_next;
-            return 0;
-        } else
+            error = 0;
+        } else if (error == 0) {
             error = EAI_FAIL;
+        }
+    } while (0);
+
+    if (error) {
+        freeaddrinfo(sentinel.ai_next);
+        *res = NULL;
+    } else {
+        *res = sentinel.ai_next;
     }
-free:
-bad:
-    freeaddrinfo(sentinel.ai_next);
-    *res = NULL;
     return error;
 }
 
@@ -576,15 +563,9 @@ static int explore_null(const struct addrinfo* pai, const char* servname, struct
 
     if (pai->ai_flags & AI_PASSIVE) {
         GET_AI(cur->ai_next, afd, afd->a_addrany);
-        /* xxx meaningless?
-         * GET_CANONNAME(cur->ai_next, "anyaddr");
-         */
         GET_PORT(cur->ai_next, servname);
     } else {
         GET_AI(cur->ai_next, afd, afd->a_loopback);
-        /* xxx meaningless?
-         * GET_CANONNAME(cur->ai_next, "localhost");
-         */
         GET_PORT(cur->ai_next, servname);
     }
     cur = cur->ai_next;
@@ -625,54 +606,31 @@ static int explore_numeric(const struct addrinfo* pai, const char* hostname, con
     afd = find_afd(pai->ai_family);
     if (afd == NULL) return 0;
 
-    switch (afd->a_af) {
-#if 0 /*X/Open spec*/
-	case AF_INET:
-		if (inet_aton(hostname, (struct in_addr *)pton) == 1) {
-			if (pai->ai_family == afd->a_af ||
-			    pai->ai_family == PF_UNSPEC /*?*/) {
-				GET_AI(cur->ai_next, afd, pton);
-				GET_PORT(cur->ai_next, servname);
-				if ((pai->ai_flags & AI_CANONNAME)) {
-					/*
-					 * Set the numeric address itself as
-					 * the canonical name, based on a
-					 * clarification in rfc2553bis-03.
-					 */
-					GET_CANONNAME(cur->ai_next, canonname);
-				}
-				while (cur && cur->ai_next)
-					cur = cur->ai_next;
-			} else
-				ERR(EAI_FAMILY);	/*xxx*/
-		}
-		break;
-#endif
-        default:
-            if (inet_pton(afd->a_af, hostname, pton) == 1) {
-                if (pai->ai_family == afd->a_af || pai->ai_family == PF_UNSPEC /*?*/) {
-                    GET_AI(cur->ai_next, afd, pton);
-                    GET_PORT(cur->ai_next, servname);
-                    if ((pai->ai_flags & AI_CANONNAME)) {
-                        /*
-                         * Set the numeric address itself as
-                         * the canonical name, based on a
-                         * clarification in rfc2553bis-03.
-                         */
-                        GET_CANONNAME(cur->ai_next, canonname);
-                    }
-                    while (cur->ai_next) cur = cur->ai_next;
-                } else
-                    ERR(EAI_FAMILY); /*xxx*/
+    if (inet_pton(afd->a_af, hostname, pton) == 1) {
+        if (pai->ai_family == afd->a_af || pai->ai_family == PF_UNSPEC /*?*/) {
+            GET_AI(cur->ai_next, afd, pton);
+            GET_PORT(cur->ai_next, servname);
+            if ((pai->ai_flags & AI_CANONNAME)) {
+                /*
+                 * Set the numeric address itself as
+                 * the canonical name, based on a
+                 * clarification in rfc2553bis-03.
+                 */
+                error = get_canonname(pai, cur->ai_next, canonname);
+                if (error != 0) {
+                    freeaddrinfo(sentinel.ai_next);
+                    return error;
+                }
             }
-            break;
+            while (cur->ai_next) cur = cur->ai_next;
+        } else
+            return EAI_FAMILY;
     }
 
     *res = sentinel.ai_next;
     return 0;
 
 free:
-bad:
     freeaddrinfo(sentinel.ai_next);
     return error;
 }
@@ -757,17 +715,14 @@ static struct addrinfo* get_ai(const struct addrinfo* pai, const struct afd* afd
     assert(afd != NULL);
     assert(addr != NULL);
 
-    ai = (struct addrinfo*) malloc(sizeof(struct addrinfo) + (afd->a_socklen));
+    ai = (struct addrinfo*) malloc(sizeof(struct addrinfo) + sizeof(sockaddr_union));
     if (ai == NULL) return NULL;
 
     memcpy(ai, pai, sizeof(struct addrinfo));
     ai->ai_addr = (struct sockaddr*) (void*) (ai + 1);
-    memset(ai->ai_addr, 0, (size_t) afd->a_socklen);
+    memset(ai->ai_addr, 0, sizeof(sockaddr_union));
 
     ai->ai_addrlen = afd->a_socklen;
-#if defined(__alpha__) || (defined(__i386__) && defined(_LP64)) || defined(__sparc64__)
-    ai->__ai_pad0 = 0;
-#endif
     ai->ai_addr->sa_family = ai->ai_family = afd->a_af;
     p = (char*) (void*) (ai->ai_addr);
     memcpy(p + afd->a_off, addr, (size_t) afd->a_addrlen);
@@ -925,7 +880,8 @@ static const char AskedForGot[] = "gethostby*.getanswer: asked for \"%s\", got \
 
 static struct addrinfo* getanswer(const querybuf* answer, int anslen, const char* qname, int qtype,
                                   const struct addrinfo* pai) {
-    struct addrinfo sentinel, *cur;
+    struct addrinfo sentinel = {};
+    struct addrinfo *cur;
     struct addrinfo ai;
     const struct afd* afd;
     char* canonname;
@@ -944,7 +900,6 @@ static struct addrinfo* getanswer(const querybuf* answer, int anslen, const char
     assert(qname != NULL);
     assert(pai != NULL);
 
-    memset(&sentinel, 0, sizeof(sentinel));
     cur = &sentinel;
 
     canonname = NULL;
@@ -1287,11 +1242,11 @@ static int _rfc6724_compare(const void* ptr1, const void* ptr2) {
     }
 
     /* Rule 2: Prefer matching scope. */
-    scope_src1 = _get_scope(&a1->src_addr.generic);
+    scope_src1 = _get_scope(&a1->src_addr.sa);
     scope_dst1 = _get_scope(a1->ai->ai_addr);
     scope_match1 = (scope_src1 == scope_dst1);
 
-    scope_src2 = _get_scope(&a2->src_addr.generic);
+    scope_src2 = _get_scope(&a2->src_addr.sa);
     scope_dst2 = _get_scope(a2->ai->ai_addr);
     scope_match2 = (scope_src2 == scope_dst2);
 
@@ -1310,11 +1265,11 @@ static int _rfc6724_compare(const void* ptr1, const void* ptr2) {
      */
 
     /* Rule 5: Prefer matching label. */
-    label_src1 = _get_label(&a1->src_addr.generic);
+    label_src1 = _get_label(&a1->src_addr.sa);
     label_dst1 = _get_label(a1->ai->ai_addr);
     label_match1 = (label_src1 == label_dst1);
 
-    label_src2 = _get_label(&a2->src_addr.generic);
+    label_src2 = _get_label(&a2->src_addr.sa);
     label_dst2 = _get_label(a2->ai->ai_addr);
     label_match2 = (label_src2 == label_dst2);
 
@@ -1347,9 +1302,9 @@ static int _rfc6724_compare(const void* ptr1, const void* ptr2) {
      */
     if (a1->has_src_addr && a1->ai->ai_addr->sa_family == AF_INET6 && a2->has_src_addr &&
         a2->ai->ai_addr->sa_family == AF_INET6) {
-        const struct sockaddr_in6* a1_src = &a1->src_addr.in6;
+        const struct sockaddr_in6* a1_src = &a1->src_addr.sin6;
         const struct sockaddr_in6* a1_dst = (const struct sockaddr_in6*) a1->ai->ai_addr;
-        const struct sockaddr_in6* a2_src = &a2->src_addr.in6;
+        const struct sockaddr_in6* a2_src = &a2->src_addr.sin6;
         const struct sockaddr_in6* a2_dst = (const struct sockaddr_in6*) a2->ai->ai_addr;
         prefixlen1 = _common_prefix_len(&a1_src->sin6_addr, &a1_dst->sin6_addr);
         prefixlen2 = _common_prefix_len(&a2_src->sin6_addr, &a2_dst->sin6_addr);
@@ -1456,7 +1411,7 @@ static void _rfc6724_sort(struct addrinfo* list_sentinel, unsigned mark, uid_t u
         elems[i].ai = cur;
         elems[i].original_order = i;
 
-        has_src_addr = _find_src_addr(cur->ai_addr, &elems[i].src_addr.generic, mark, uid);
+        has_src_addr = _find_src_addr(cur->ai_addr, &elems[i].src_addr.sa, mark, uid);
         if (has_src_addr == -1) {
             goto error;
         }
@@ -1478,14 +1433,13 @@ error:
 
 static int dns_getaddrinfo(const char* name, const addrinfo* pai,
                            const android_net_context* netcontext, addrinfo** rv) {
-    struct addrinfo* ai;
-    struct addrinfo sentinel, *cur;
+    struct addrinfo *ai, *cur;
+    struct addrinfo sentinel = {};
     struct res_target q, q2;
     res_state res;
 
     memset(&q, 0, sizeof(q));
     memset(&q2, 0, sizeof(q2));
-    memset(&sentinel, 0, sizeof(sentinel));
     cur = &sentinel;
 
     querybuf* buf = (querybuf*) malloc(sizeof(*buf));
@@ -1564,11 +1518,13 @@ static int dns_getaddrinfo(const char* name, const addrinfo* pai,
      * and have a cache hit that would be wasted, so we do the rest there on miss
      */
     res_setnetcontext(res, netcontext);
-    if (res_searchN(name, &q, res) < 0) {
-        res_put_state(res);
+
+    // Pass ai_error to catch more detailed errors rather than EAI_NODATA.
+    int ai_error = EAI_NODATA;
+    if (res_searchN(name, &q, res, &ai_error) < 0) {
         free(buf);
         free(buf2);
-        return EAI_NODATA;  // TODO: Decode error from h_errno like we do below
+        return ai_error;  // TODO: Decode error from h_errno like we do below
     }
     ai = getanswer(buf, q.n, q.name, q.qtype, pai);
     if (ai) {
@@ -1582,20 +1538,10 @@ static int dns_getaddrinfo(const char* name, const addrinfo* pai,
     free(buf);
     free(buf2);
     if (sentinel.ai_next == NULL) {
-        res_put_state(res);
-        switch (h_errno) {
-            case HOST_NOT_FOUND:
-                return EAI_NODATA;
-            case TRY_AGAIN:
-                return EAI_AGAIN;
-            default:
-                return EAI_FAIL;
-        }
+        return herrnoToAiError(h_errno);
     }
 
     _rfc6724_sort(&sentinel, netcontext->app_mark, netcontext->uid);
-
-    res_put_state(res);
 
     *rv = sentinel.ai_next;
     return 0;
@@ -1618,7 +1564,7 @@ static void _endhtent(FILE** hostf) {
 static struct addrinfo* _gethtent(FILE** hostf, const char* name, const struct addrinfo* pai) {
     char* p;
     char *cp, *tname, *cname;
-    struct addrinfo hints, *res0, *res;
+    struct addrinfo *res0, *res;
     int error;
     const char* addr;
     char hostbuf[8 * 1024];
@@ -1651,9 +1597,7 @@ again:
     goto again;
 
 found:
-    hints = *pai;
-    hints.ai_flags = AI_NUMERICHOST;
-    error = getaddrinfo(addr, NULL, &hints, &res0);
+    error = getaddrinfo_numeric(addr, nullptr, *pai, &res0);
     if (error) goto again;
     for (res = res0; res; res = res->ai_next) {
         /* cover it up */
@@ -1670,11 +1614,10 @@ found:
 }
 
 static bool files_getaddrinfo(const char* name, const addrinfo* pai, addrinfo** res) {
-    struct addrinfo sentinel, *cur;
-    struct addrinfo* p;
+    struct addrinfo sentinel = {};
+    struct addrinfo *p, *cur;
     FILE* hostf = NULL;
 
-    memset(&sentinel, 0, sizeof(sentinel));
     cur = &sentinel;
 
     _sethtent(&hostf);
@@ -1700,8 +1643,7 @@ static bool files_getaddrinfo(const char* name, const addrinfo* pai, addrinfo** 
  *
  * Caller must parse answer and determine whether it answers the question.
  */
-static int res_queryN(const char* name, /* domain name */ struct res_target* target,
-                      res_state res) {
+static int res_queryN(const char* name, res_target* target, res_state res, int* ai_error) {
     u_char buf[MAXPACKET];
     HEADER* hp;
     int n;
@@ -1746,7 +1688,9 @@ static int res_queryN(const char* name, /* domain name */ struct res_target* tar
             h_errno = NO_RECOVERY;
             return n;
         }
-        n = res_nsend(res, buf, n, answer, anslen);
+
+        n = res_nsend(res, buf, n, answer, anslen, &rcode);
+        *ai_error = rcodeToAiError(rcode);
 
         if (n < 0 || hp->rcode != NOERROR || ntohs(hp->ancount) == 0) {
             rcode = hp->rcode; /* record most recent error */
@@ -1800,7 +1744,7 @@ static int res_queryN(const char* name, /* domain name */ struct res_target* tar
  * If enabled, implement search rules until answer or unrecoverable failure
  * is detected.  Error code, if any, is left in h_errno.
  */
-static int res_searchN(const char* name, struct res_target* target, res_state res) {
+static int res_searchN(const char* name, res_target* target, res_state res, int* ai_error) {
     const char *cp, *const *domain;
     HEADER* hp;
     u_int dots;
@@ -1825,7 +1769,7 @@ static int res_searchN(const char* name, struct res_target* target, res_state re
      */
     saved_herrno = -1;
     if (dots >= res->ndots) {
-        ret = res_querydomainN(name, NULL, target, res);
+        ret = res_querydomainN(name, NULL, target, res, ai_error);
         if (ret > 0) return (ret);
         saved_herrno = h_errno;
         tried_as_is++;
@@ -1848,7 +1792,7 @@ static int res_searchN(const char* name, struct res_target* target, res_state re
         _resolv_populate_res_for_net(res);
 
         for (domain = (const char* const*) res->dnsrch; *domain && !done; domain++) {
-            ret = res_querydomainN(name, *domain, target, res);
+            ret = res_querydomainN(name, *domain, target, res, ai_error);
             if (ret > 0) return ret;
 
             /*
@@ -1901,7 +1845,7 @@ static int res_searchN(const char* name, struct res_target* target, res_state re
      * name or whether it ends with a dot.
      */
     if (!tried_as_is) {
-        ret = res_querydomainN(name, NULL, target, res);
+        ret = res_querydomainN(name, NULL, target, res, ai_error);
         if (ret > 0) return ret;
     }
 
@@ -1926,8 +1870,8 @@ static int res_searchN(const char* name, struct res_target* target, res_state re
  * Perform a call on res_query on the concatenation of name and domain,
  * removing a trailing dot from name if domain is NULL.
  */
-static int res_querydomainN(const char* name, const char* domain, struct res_target* target,
-                            res_state res) {
+static int res_querydomainN(const char* name, const char* domain, res_target* target, res_state res,
+                            int* ai_error) {
     char nbuf[MAXDNAME];
     const char* longname = nbuf;
     size_t n, d;
@@ -1963,5 +1907,5 @@ static int res_querydomainN(const char* name, const char* domain, struct res_tar
         }
         snprintf(nbuf, sizeof(nbuf), "%s.%s", name, domain);
     }
-    return res_queryN(longname, target, res);
+    return res_queryN(longname, target, res, ai_error);
 }

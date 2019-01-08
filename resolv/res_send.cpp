@@ -100,6 +100,10 @@ constexpr bool kVerboseLogging = false;
 
 #include <android-base/logging.h>
 
+#include <netdutils/Slice.h>
+#include "netd_resolv/DnsTlsDispatcher.h"
+#include "netd_resolv/DnsTlsTransport.h"
+#include "netd_resolv/PrivateDnsConfiguration.h"
 #include "netd_resolv/resolv.h"
 #include "netd_resolv/stats.h"
 #include "private/android_filesystem_config.h"
@@ -107,7 +111,8 @@ constexpr bool kVerboseLogging = false;
 #include "resolv_cache.h"
 #include "resolv_private.h"
 
-#define EXT(res) ((res)->_u._ext)
+// TODO: use the namespace something like android::netd_resolv for libnetd_resolv
+using namespace android::net;
 
 #define VLOG if (!kVerboseLogging) {} else LOG(INFO)
 
@@ -135,6 +140,8 @@ static_assert(kVerboseLogging == false,
     }
 #endif  // DEBUG
 
+static DnsTlsDispatcher sDnsTlsDispatcher;
+
 static int get_salen(const struct sockaddr*);
 static struct sockaddr* get_nsaddr(res_state, size_t);
 static int send_vc(res_state, struct __res_params* params, const u_char*, int, u_char*, int, int*,
@@ -147,13 +154,10 @@ static int sock_eq(struct sockaddr*, struct sockaddr*);
 static int connect_with_timeout(int sock, const struct sockaddr* nsap, socklen_t salen,
                                 const struct timespec timeout);
 static int retrying_poll(const int sock, short events, const struct timespec* finish);
+static int res_tls_send(res_state, const Slice query, const Slice answer, int* error,
+                        bool* fallback);
 
 /* BIONIC-BEGIN: implement source port randomization */
-typedef union {
-    struct sockaddr sa;
-    struct sockaddr_in sin;
-    struct sockaddr_in6 sin6;
-} _sockaddr_union;
 
 // BEGIN: Code copied from ISC eventlib
 // TODO: move away from this code
@@ -222,7 +226,7 @@ static struct iovec evConsIovec(void* buf, size_t cnt) {
 // END: Code copied from ISC eventlib
 
 static int random_bind(int s, int family) {
-    _sockaddr_union u;
+    sockaddr_union u;
     int j;
     socklen_t slen;
 
@@ -292,7 +296,7 @@ static int res_ourserver_p(const res_state statp, const sockaddr* sa) {
             }
             break;
         case AF_INET6:
-            if (EXT(statp).ext == NULL) break;
+            if (statp->_u._ext.ext == NULL) break;
             in6p = (const struct sockaddr_in6*) (const void*) sa;
             for (ns = 0; ns < statp->nscount; ns++) {
                 srv6 = (struct sockaddr_in6*) (void*) get_nsaddr(statp, (size_t) ns);
@@ -384,7 +388,7 @@ int res_queriesmatch(const u_char* buf1, const u_char* eom1, const u_char* buf2,
     return (1);
 }
 
-int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int anssiz) {
+int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int anssiz, int* rcode) {
     int gotsomewhere, terrno, v_circuit, resplen, n;
     ResolvCacheStatus cache_status = RESOLV_CACHE_UNSUPPORTED;
 
@@ -421,25 +425,25 @@ int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int a
      * If the ns_addr_list in the resolver context has changed, then
      * invalidate our cached copy and the associated timing data.
      */
-    if (EXT(statp).nscount != 0) {
+    if (statp->_u._ext.nscount != 0) {
         int needclose = 0;
         struct sockaddr_storage peer;
         socklen_t peerlen;
 
-        if (EXT(statp).nscount != statp->nscount) {
+        if (statp->_u._ext.nscount != statp->nscount) {
             needclose++;
         } else {
             for (int ns = 0; ns < statp->nscount; ns++) {
                 if (statp->nsaddr_list[ns].sin_family &&
                     !sock_eq((struct sockaddr*) (void*) &statp->nsaddr_list[ns],
-                             (struct sockaddr*) (void*) &EXT(statp).ext->nsaddrs[ns])) {
+                             (struct sockaddr*) (void*) &statp->_u._ext.ext->nsaddrs[ns])) {
                     needclose++;
                     break;
                 }
 
-                if (EXT(statp).nssocks[ns] == -1) continue;
+                if (statp->_u._ext.nssocks[ns] == -1) continue;
                 peerlen = sizeof(peer);
-                if (getpeername(EXT(statp).nssocks[ns], (struct sockaddr*) (void*) &peer,
+                if (getpeername(statp->_u._ext.nssocks[ns], (struct sockaddr*) (void*) &peer,
                                 &peerlen) < 0) {
                     needclose++;
                     break;
@@ -452,21 +456,21 @@ int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int a
         }
         if (needclose) {
             res_nclose(statp);
-            EXT(statp).nscount = 0;
+            statp->_u._ext.nscount = 0;
         }
     }
 
     /*
      * Maybe initialize our private copy of the ns_addr_list.
      */
-    if (EXT(statp).nscount == 0) {
+    if (statp->_u._ext.nscount == 0) {
         for (int ns = 0; ns < statp->nscount; ns++) {
-            EXT(statp).nstimes[ns] = RES_MAXTIME;
-            EXT(statp).nssocks[ns] = -1;
+            statp->_u._ext.nstimes[ns] = RES_MAXTIME;
+            statp->_u._ext.nssocks[ns] = -1;
             if (!statp->nsaddr_list[ns].sin_family) continue;
-            EXT(statp).ext->nsaddrs[ns].sin = statp->nsaddr_list[ns];
+            statp->_u._ext.ext->nsaddrs[ns].sin = statp->nsaddr_list[ns];
         }
-        EXT(statp).nscount = statp->nscount;
+        statp->_u._ext.nscount = statp->nscount;
     }
 
     /*
@@ -474,27 +478,27 @@ int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int a
      * Note that RES_BLAST overrides RES_ROTATE.
      */
     if ((statp->options & RES_ROTATE) != 0U && (statp->options & RES_BLAST) == 0U) {
-        union res_sockaddr_union inu;
+        sockaddr_union inu;
         struct sockaddr_in ina;
         int lastns = statp->nscount - 1;
         int fd;
         u_int16_t nstime;
 
-        if (EXT(statp).ext != NULL) inu = EXT(statp).ext->nsaddrs[0];
+        if (statp->_u._ext.ext != NULL) inu = statp->_u._ext.ext->nsaddrs[0];
         ina = statp->nsaddr_list[0];
-        fd = EXT(statp).nssocks[0];
-        nstime = EXT(statp).nstimes[0];
+        fd = statp->_u._ext.nssocks[0];
+        nstime = statp->_u._ext.nstimes[0];
         for (int ns = 0; ns < lastns; ns++) {
-            if (EXT(statp).ext != NULL)
-                EXT(statp).ext->nsaddrs[ns] = EXT(statp).ext->nsaddrs[ns + 1];
+            if (statp->_u._ext.ext != NULL)
+                statp->_u._ext.ext->nsaddrs[ns] = statp->_u._ext.ext->nsaddrs[ns + 1];
             statp->nsaddr_list[ns] = statp->nsaddr_list[ns + 1];
-            EXT(statp).nssocks[ns] = EXT(statp).nssocks[ns + 1];
-            EXT(statp).nstimes[ns] = EXT(statp).nstimes[ns + 1];
+            statp->_u._ext.nssocks[ns] = statp->_u._ext.nssocks[ns + 1];
+            statp->_u._ext.nstimes[ns] = statp->_u._ext.nstimes[ns + 1];
         }
-        if (EXT(statp).ext != NULL) EXT(statp).ext->nsaddrs[lastns] = inu;
+        if (statp->_u._ext.ext != NULL) statp->_u._ext.ext->nsaddrs[lastns] = inu;
         statp->nsaddr_list[lastns] = ina;
-        EXT(statp).nssocks[lastns] = fd;
-        EXT(statp).nstimes[lastns] = nstime;
+        statp->_u._ext.nssocks[lastns] = fd;
+        statp->_u._ext.nstimes[lastns] = nstime;
     }
 
     /*
@@ -512,44 +516,30 @@ int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int a
             struct sockaddr* nsap;
             int nsaplen;
             time_t now = 0;
-            int rcode = RCODE_INTERNAL_ERROR;
             int delay = 0;
+            *rcode = RCODE_INTERNAL_ERROR;
             nsap = get_nsaddr(statp, (size_t) ns);
             nsaplen = get_salen(nsap);
             statp->_flags &= ~RES_F_LASTMASK;
             statp->_flags |= (ns << RES_F_LASTSHIFT);
 
         same_ns:
-            if (statp->qhook) {
-                int done = 0, loops = 0;
-
-                do {
-                    res_sendhookact act;
-
-                    act = (*statp->qhook)(&nsap, &buf, &buflen, ans, anssiz, &resplen);
-                    switch (act) {
-                        case res_goahead:
-                            done = 1;
-                            break;
-                        case res_nextns:
-                            res_nclose(statp);
-                            goto next_ns;
-                        case res_done:
-                            if (cache_status == RESOLV_CACHE_NOTFOUND) {
-                                _resolv_cache_add(statp->netid, buf, buflen, ans, resplen);
-                            }
-                            return (resplen);
-                        case res_modified:
-                            /* give the hook another try */
-                            if (++loops < 42) /*doug adams*/
-                                break;
-                            [[fallthrough]];
-                        case res_error:
-                            [[fallthrough]];
-                        default:
-                            goto fail;
+            // TODO: Since we expect there is only one DNS server being queried here while this
+            // function tries to query all of private DNS servers. Consider moving it to other
+            // reasonable place. In addition, maybe add stats for private DNS.
+            if (!statp->use_local_nameserver) {
+                bool fallback = false;
+                resplen = res_tls_send(statp, Slice(const_cast<u_char*>(buf), buflen),
+                                       Slice(ans, anssiz), rcode, &fallback);
+                if (resplen > 0) {
+                    if (cache_status == RESOLV_CACHE_NOTFOUND) {
+                        _resolv_cache_add(statp->netid, buf, buflen, ans, resplen);
                     }
-                } while (!done);
+                    return resplen;
+                }
+                if (!fallback) {
+                    goto fail;
+                }
             }
 
             [[maybe_unused]] static const int niflags = NI_NUMERICHOST | NI_NUMERICSERV;
@@ -563,7 +553,7 @@ int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int a
                 /* Use VC; at most one attempt per server. */
                 attempt = statp->retry;
 
-                n = send_vc(statp, &params, buf, buflen, ans, anssiz, &terrno, ns, &now, &rcode,
+                n = send_vc(statp, &params, buf, buflen, ans, anssiz, &terrno, ns, &now, rcode,
                             &delay);
 
                 /*
@@ -573,7 +563,7 @@ int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int a
                  */
                 if (attempt == 0) {
                     res_sample sample;
-                    _res_stats_set_sample(&sample, now, rcode, delay);
+                    _res_stats_set_sample(&sample, now, *rcode, delay);
                     _resolv_cache_add_resolver_stats_sample(statp->netid, revision_id, ns, &sample,
                                                             params.max_samples);
                 }
@@ -588,12 +578,12 @@ int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int a
                 VLOG << "using send_dg";
 
                 n = send_dg(statp, &params, buf, buflen, ans, anssiz, &terrno, ns, &v_circuit,
-                            &gotsomewhere, &now, &rcode, &delay);
+                            &gotsomewhere, &now, rcode, &delay);
 
                 /* Only record stats the first time we try a query. See above. */
                 if (attempt == 0) {
                     res_sample sample;
-                    _res_stats_set_sample(&sample, now, rcode, delay);
+                    _res_stats_set_sample(&sample, now, *rcode, delay);
                     _resolv_cache_add_resolver_stats_sample(statp->netid, revision_id, ns, &sample,
                                                             params.max_samples);
                 }
@@ -625,33 +615,6 @@ int res_nsend(res_state statp, const u_char* buf, int buflen, u_char* ans, int a
             if ((v_circuit && (statp->options & RES_USEVC) == 0U) ||
                 (statp->options & RES_STAYOPEN) == 0U) {
                 res_nclose(statp);
-            }
-            if (statp->rhook) {
-                int done = 0, loops = 0;
-
-                do {
-                    res_sendhookact act;
-
-                    act = (*statp->rhook)(nsap, buf, buflen, ans, anssiz, &resplen);
-                    switch (act) {
-                        case res_goahead:
-                        case res_done:
-                            done = 1;
-                            break;
-                        case res_nextns:
-                            res_nclose(statp);
-                            goto next_ns;
-                        case res_modified:
-                            /* give the hook another try */
-                            if (++loops < 42) /*doug adams*/
-                                break;
-                            [[fallthrough]];
-                        case res_error:
-                            [[fallthrough]];
-                        default:
-                            goto fail;
-                    }
-                } while (!done);
             }
             return (resplen);
         next_ns:;
@@ -691,18 +654,18 @@ static int get_salen(const struct sockaddr* sa) {
  * pick appropriate nsaddr_list for use.  see res_init() for initialization.
  */
 static struct sockaddr* get_nsaddr(res_state statp, size_t n) {
-    if (!statp->nsaddr_list[n].sin_family && EXT(statp).ext) {
+    if (!statp->nsaddr_list[n].sin_family && statp->_u._ext.ext) {
         /*
-         * - EXT(statp).ext->nsaddrs[n] holds an address that is larger
+         * - statp->_u._ext.ext->nsaddrs[n] holds an address that is larger
          *   than struct sockaddr, and
          * - user code did not update statp->nsaddr_list[n].
          */
-        return (struct sockaddr*) (void*) &EXT(statp).ext->nsaddrs[n];
+        return (struct sockaddr*) (void*) &statp->_u._ext.ext->nsaddrs[n];
     } else {
         /*
          * - user code updated statp->nsaddr_list[n], or
          * - statp->nsaddr_list[n] has the same content as
-         *   EXT(statp).ext->nsaddrs[n].
+         *   statp->_u._ext.ext->nsaddrs[n].
          */
         return (struct sockaddr*) (void*) &statp->nsaddr_list[n];
     }
@@ -738,7 +701,6 @@ static int send_vc(res_state statp, struct __res_params* params, const u_char* b
                    u_char* ans, int anssiz, int* terrno, int ns, time_t* at, int* rcode,
                    int* delay) {
     *at = time(NULL);
-    *rcode = RCODE_INTERNAL_ERROR;
     *delay = 0;
     const HEADER* hp = (const HEADER*) (const void*) buf;
     HEADER* anhp = (HEADER*) (void*) ans;
@@ -1008,7 +970,6 @@ static int send_dg(res_state statp, struct __res_params* params, const u_char* b
                    u_char* ans, int anssiz, int* terrno, int ns, int* v_circuit, int* gotsomewhere,
                    time_t* at, int* rcode, int* delay) {
     *at = time(NULL);
-    *rcode = RCODE_INTERNAL_ERROR;
     *delay = 0;
     const HEADER* hp = (const HEADER*) (const void*) buf;
     HEADER* anhp = (HEADER*) (void*) ans;
@@ -1021,9 +982,9 @@ static int send_dg(res_state statp, struct __res_params* params, const u_char* b
 
     nsap = get_nsaddr(statp, (size_t) ns);
     nsaplen = get_salen(nsap);
-    if (EXT(statp).nssocks[ns] == -1) {
-        EXT(statp).nssocks[ns] = socket(nsap->sa_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-        if (EXT(statp).nssocks[ns] < 0) {
+    if (statp->_u._ext.nssocks[ns] == -1) {
+        statp->_u._ext.nssocks[ns] = socket(nsap->sa_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (statp->_u._ext.nssocks[ns] < 0) {
             switch (errno) {
                 case EPROTONOSUPPORT:
                 case EPFNOSUPPORT:
@@ -1037,9 +998,9 @@ static int send_dg(res_state statp, struct __res_params* params, const u_char* b
             }
         }
 
-        fchown(EXT(statp).nssocks[ns], AID_DNS, -1);
+        fchown(statp->_u._ext.nssocks[ns], AID_DNS, -1);
         if (statp->_mark != MARK_UNSET) {
-            if (setsockopt(EXT(statp).nssocks[ns], SOL_SOCKET, SO_MARK, &(statp->_mark),
+            if (setsockopt(statp->_u._ext.nssocks[ns], SOL_SOCKET, SO_MARK, &(statp->_mark),
                            sizeof(statp->_mark)) < 0) {
                 res_nclose(statp);
                 return -1;
@@ -1057,12 +1018,12 @@ static int send_dg(res_state statp, struct __res_params* params, const u_char* b
          * error message is received.  We can thus detect
          * the absence of a nameserver without timing out.
          */
-        if (random_bind(EXT(statp).nssocks[ns], nsap->sa_family) < 0) {
+        if (random_bind(statp->_u._ext.nssocks[ns], nsap->sa_family) < 0) {
             Aerror(statp, stderr, "bind(dg)", errno, nsap, nsaplen);
             res_nclose(statp);
             return (0);
         }
-        if (connect(EXT(statp).nssocks[ns], nsap, (socklen_t) nsaplen) < 0) {
+        if (connect(statp->_u._ext.nssocks[ns], nsap, (socklen_t) nsaplen) < 0) {
             Aerror(statp, stderr, "connect(dg)", errno, nsap, nsaplen);
             res_nclose(statp);
             return (0);
@@ -1070,7 +1031,7 @@ static int send_dg(res_state statp, struct __res_params* params, const u_char* b
 #endif /* !CANNOT_CONNECT_DGRAM */
         Dprint(statp->options & RES_DEBUG, (stdout, ";; new DG socket\n"))
     }
-    s = EXT(statp).nssocks[ns];
+    s = statp->_u._ext.nssocks[ns];
 #ifndef CANNOT_CONNECT_DGRAM
     if (send(s, (const char*) buf, (size_t) buflen, 0) != buflen) {
         Perror(statp, stderr, "send", errno);
@@ -1253,5 +1214,80 @@ static int sock_eq(struct sockaddr* a, struct sockaddr* b) {
                    IN6_ARE_ADDR_EQUAL(&a6->sin6_addr, &b6->sin6_addr);
         default:
             return 0;
+    }
+}
+
+static int res_tls_send(res_state statp, const Slice query, const Slice answer, int* error,
+                        bool* fallback) {
+    int resplen = 0;
+    const unsigned netId = statp->netid;
+    const unsigned mark = statp->_mark;
+
+    PrivateDnsStatus privateDnsStatus = gPrivateDnsConfiguration.getStatus(netId);
+
+    if (privateDnsStatus.mode == PrivateDnsMode::OFF) {
+        *fallback = true;
+        return -1;
+    }
+
+    if (privateDnsStatus.validatedServers.empty()) {
+        if (privateDnsStatus.mode == PrivateDnsMode::OPPORTUNISTIC) {
+            *fallback = true;
+            return -1;
+        } else {
+            // Sleep and iterate some small number of times checking for the
+            // arrival of resolved and validated server IP addresses, instead
+            // of returning an immediate error.
+            for (int i = 0; i < 42; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!gPrivateDnsConfiguration.getStatus(netId).validatedServers.empty()) {
+                    privateDnsStatus = gPrivateDnsConfiguration.getStatus(netId);
+                    break;
+                }
+            }
+            if (privateDnsStatus.validatedServers.empty()) {
+                return -1;
+            }
+        }
+    }
+
+    VLOG << __func__ << ": performing query over TLS";
+
+    const auto response = sDnsTlsDispatcher.query(privateDnsStatus.validatedServers, mark, query,
+                                                  answer, &resplen);
+
+    VLOG << __func__ << ": TLS query result: " << static_cast<int>(response);
+
+    if (privateDnsStatus.mode == PrivateDnsMode::OPPORTUNISTIC) {
+        // In opportunistic mode, handle falling back to cleartext in some
+        // cases (DNS shouldn't fail if a validated opportunistic mode server
+        // becomes unreachable for some reason).
+        switch (response) {
+            case DnsTlsTransport::Response::success:
+                return resplen;
+            case DnsTlsTransport::Response::network_error:
+                // No need to set the error timeout here since it will fallback to UDP.
+            case DnsTlsTransport::Response::internal_error:
+                // Note: this will cause cleartext queries to be emitted, with
+                // all of the EDNS0 goodness enabled. Fingers crossed.  :-/
+                *fallback = true;
+                [[fallthrough]];
+            default:
+                return -1;
+        }
+    } else {
+        // Strict mode
+        switch (response) {
+            case DnsTlsTransport::Response::success:
+                return resplen;
+            case DnsTlsTransport::Response::network_error:
+                // This case happens when the query stored in DnsTlsTransport is expired since
+                // either 1) the query has been tried for 3 times but no response or 2) fail to
+                // establish the connection with the server.
+                *error = RCODE_TIMEOUT;
+                [[fallthrough]];
+            default:
+                return -1;
+        }
     }
 }

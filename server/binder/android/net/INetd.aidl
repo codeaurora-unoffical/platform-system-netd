@@ -16,8 +16,9 @@
 
 package android.net;
 
-import android.net.UidRange;
+import android.net.UidRangeParcel;
 import android.net.TetherStatsParcel;
+import android.net.InterfaceConfigurationParcel;
 
 /** {@hide} */
 interface INetd {
@@ -130,7 +131,7 @@ interface INetd {
      * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
      *         unix errno.
      */
-    void networkAddUidRanges(int netId, in UidRange[] uidRanges);
+    void networkAddUidRanges(int netId, in UidRangeParcel[] uidRanges);
 
     /**
      * Adds the specified UID ranges to the specified network. The network must be a VPN. Traffic
@@ -143,7 +144,7 @@ interface INetd {
      * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
      *         unix errno.
      */
-    void networkRemoveUidRanges(int netId, in UidRange[] uidRanges);
+    void networkRemoveUidRanges(int netId, in UidRangeParcel[] uidRanges);
 
     /**
      * Adds or removes one rule for each supplied UID range to prohibit all network activity outside
@@ -166,12 +167,12 @@ interface INetd {
      * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
      *         unix errno.
      */
-    void networkRejectNonSecureVpn(boolean add, in UidRange[] uidRanges);
+    void networkRejectNonSecureVpn(boolean add, in UidRangeParcel[] uidRanges);
 
     /**
      * Administratively closes sockets belonging to the specified UIDs.
      */
-    void socketDestroy(in UidRange[] uidRanges, in int[] exemptUids);
+    void socketDestroy(in UidRangeParcel[] uidRanges, in int[] exemptUids);
 
     // Array indices for resolver parameters.
     const int RESOLVER_PARAMS_SAMPLE_VALIDITY = 0;
@@ -823,8 +824,7 @@ interface INetd {
     */
     @utf8InCpp List<String> tetherDnsList();
 
-    // Keep in sync with system/netd/NetworkController.cpp
-    const int NETID_LOCAL = 99;
+    const int LOCAL_NET_ID = 99;
 
     // Route does not specify a next hop
     const String NEXTHOP_NONE = "";
@@ -933,7 +933,9 @@ interface INetd {
     */
     void networkClearDefault();
 
-    // PERMISSION_NONE is used for regular networks and apps
+    /**
+     * PERMISSION_NONE is used for regular networks and apps
+     */
     const int PERMISSION_NONE = 0;
     /**
      * PERMISSION_NETWORK indicates that the network is only accessible
@@ -992,7 +994,143 @@ interface INetd {
     * Get the status of network protect for user
     *
     * @param uids uid of user
-    * @return true if the user is protected, false otherwise.
+    * @return true if the user can protect sockets from VPN, false otherwise.
     */
     boolean networkCanProtect(int uid);
+
+    // Whitelist only allows packets from specific UID/Interface
+    const int FIREWALL_WHITELIST = 0;
+    // Blacklist blocks packets from specific UID/Interface
+    const int FIREWALL_BLACKLIST = 1;
+
+   /**
+    * Set type of firewall
+    * Type whitelist only allows packets from specific UID/Interface
+    * Type blacklist blocks packets from specific UID/Interface
+    *
+    * @param firewalltype type of firewall, either FIREWALL_WHITELIST or FIREWALL_BLACKLIST
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void firewallSetFirewallType(int firewalltype);
+
+    // Specify allow Rule which allows packets
+    const int FIREWALL_RULE_ALLOW = 1;
+    // Specify deny Rule which drops packets
+    const int FIREWALL_RULE_DENY = 2;
+
+    // No specific chain is chosen, use general firewall chain(fw_input, fw_output)
+    const int FIREWALL_CHAIN_NONE = 0;
+    // Specify DOZABLE chain(fw_dozable) which is used in dozable mode
+    const int FIREWALL_CHAIN_DOZABLE = 1;
+    // Specify STANDBY chain(fw_standby) which is used in standby mode
+    const int FIREWALL_CHAIN_STANDBY = 2;
+    // Specify POWERSAVE chain(fw_powersave) which is used in power save mode
+    const int FIREWALL_CHAIN_POWERSAVE = 3;
+
+   /**
+    * Set firewall rule for interface
+    *
+    * @param ifName the interface to allow/deny
+    * @param firewallRule either FIREWALL_RULE_ALLOW or FIREWALL_RULE_DENY
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void firewallSetInterfaceRule(in @utf8InCpp String ifName, int firewallRule);
+
+   /**
+    * Set firewall rule for uid
+    *
+    * @param childChain target chain
+    * @param uid uid to allow/deny
+    * @param firewallRule either FIREWALL_RULE_ALLOW or FIREWALL_RULE_DENY
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void firewallSetUidRule(int childChain, int uid, int firewallRule);
+
+   /**
+    * Enable/Disable target firewall child chain
+    *
+    * @param childChain target chain to enable
+    * @param enable whether to enable or disable child chain.
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void firewallEnableChildChain(int childChain, boolean enable);
+
+   /**
+    * Get interface list
+    *
+    * @return A list of all the interfaces on the system.
+    * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
+    *         unix errno.
+    */
+    @utf8InCpp List<String> interfaceGetList();
+
+    const String IF_STATE_UP = "up";
+    const String IF_STATE_DOWN = "down";
+    const String IF_FLAG_BROADCAST = "broadcast";
+    const String IF_FLAG_LOOPBACK = "loopback";
+    const String IF_FLAG_POINTOPOINT = "point-to-point";
+    const String IF_FLAG_RUNNING = "running";
+    const String IF_FLAG_MULTICAST = "multicast";
+
+   /**
+    * Get interface configuration
+    *
+    * @param ifName interface name
+    * @return An InterfaceConfigurationParcel for the specified interface.
+    * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
+    *         unix errno.
+    */
+    InterfaceConfigurationParcel interfaceGetCfg(in @utf8InCpp String ifName);
+
+   /**
+    * Set interface configuration
+    *
+    * @param cfg Interface configuration to set
+    * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
+    *         unix errno.
+    */
+    void interfaceSetCfg(in InterfaceConfigurationParcel cfg);
+
+   /**
+    * Set interface IPv6 privacy extensions
+    *
+    * @param ifName interface name
+    * @param enable whether to enable or disable this setting.
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void interfaceSetIPv6PrivacyExtensions(in @utf8InCpp String ifName, boolean enable);
+
+   /**
+    * Clear all IP addresses on the given interface
+    *
+    * @param ifName interface name
+    * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
+    *         POSIX errno.
+    */
+    void interfaceClearAddrs(in @utf8InCpp String ifName);
+
+   /**
+    * Enable or disable IPv6 on the given interface
+    *
+    * @param ifName interface name
+    * @param enable whether to enable or disable this setting.
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void interfaceSetEnableIPv6(in @utf8InCpp String ifName, boolean enable);
+
+   /**
+    * Set interface MTU
+    *
+    * @param ifName interface name
+    * @param mtu MTU value
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void interfaceSetMtu(in @utf8InCpp String ifName, int mtu);
 }
