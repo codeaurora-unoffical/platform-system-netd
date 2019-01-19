@@ -310,8 +310,8 @@ class PrivateDnsConfiguration {
         }
         const bool modeDoesReevaluation = (mode->second == PrivateDnsMode::STRICT);
 
-        bool reevaluationStatus =
-                (success || !modeDoesReevaluation) ? DONT_REEVALUATE : NEEDS_REEVALUATION;
+        bool reevaluationStatus = (success || !modeDoesReevaluation)
+                ? DONT_REEVALUATE : NEEDS_REEVALUATION;
 
         auto& tracker = netPair->second;
         auto serverPair = tracker.find(server);
@@ -354,10 +354,10 @@ class PrivateDnsConfiguration {
             }
         } else {
             // Validation failure is expected if a user is on a captive portal.
-            // TODO: Trigger a second validation attempt after captive portal login
-            // succeeds.
-            tracker[server] = (reevaluationStatus == NEEDS_REEVALUATION) ? Validation::in_process
-                                                                         : Validation::fail;
+            // A second validation attempt is triggered in opportunistic mode
+            // by the framework after captive portal login succeeds.
+            tracker[server] = (reevaluationStatus == NEEDS_REEVALUATION)
+                    ? Validation::in_process : Validation::fail;
             if (DBG) {
                 ALOGD("Validation failed for %s!", addrToString(&(server.ss)).c_str());
             }
@@ -365,6 +365,7 @@ class PrivateDnsConfiguration {
 
         return reevaluationStatus;
     }
+
 
     // Start validation for newly added servers as well as any servers that have
     // landed in Validation::fail state. Note that servers that have failed
