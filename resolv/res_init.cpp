@@ -135,7 +135,7 @@ int res_vinit(res_state statp, int preinit) {
     int nserv = 0; /* number of nameserver records read from file */
     int havesearch = 0;
     int dots;
-    union res_sockaddr_union u[2];
+    sockaddr_union u[2];
 
     if ((statp->options & RES_INIT) != 0U) res_ndestroy(statp);
 
@@ -158,10 +158,9 @@ int res_vinit(res_state statp, int preinit) {
     statp->pfcode = 0;
     statp->_vcsock = -1;
     statp->_flags = 0;
-    statp->qhook = NULL;
-    statp->rhook = NULL;
     statp->_u._ext.nscount = 0;
     statp->_u._ext.ext = (res_state_ext*) malloc(sizeof(*statp->_u._ext.ext));
+    statp->use_local_nameserver = false;
     if (statp->_u._ext.ext != NULL) {
         memset(statp->_u._ext.ext, 0, sizeof(*statp->_u._ext.ext));
         statp->_u._ext.ext->nsaddrs[0].sin = statp->nsaddr;
@@ -331,7 +330,7 @@ void res_ndestroy(res_state statp) {
     statp->_u._ext.ext = NULL;
 }
 
-void res_setservers(res_state statp, const union res_sockaddr_union* set, int cnt) {
+void res_setservers(res_state statp, const sockaddr_union* set, int cnt) {
     int i, nserv;
     size_t size;
 
@@ -376,7 +375,7 @@ void res_setservers(res_state statp, const union res_sockaddr_union* set, int cn
     statp->nscount = nserv;
 }
 
-int res_getservers(res_state statp, union res_sockaddr_union* set, int cnt) {
+int res_getservers(res_state statp, sockaddr_union* set, int cnt) {
     int i;
     size_t size;
     uint16_t family;
@@ -419,9 +418,11 @@ void res_setnetcontext(res_state statp, const struct android_net_context* netcon
     if (statp != NULL) {
         statp->netid = netcontext->dns_netid;
         statp->_mark = netcontext->dns_mark;
-        statp->qhook = netcontext->qhook;
         if (netcontext->flags & NET_CONTEXT_FLAG_USE_EDNS) {
             statp->options |= RES_USE_EDNS0 | RES_USE_DNSSEC;
+        }
+        if (netcontext->flags & NET_CONTEXT_FLAG_USE_LOCAL_NAMESERVERS) {
+            statp->use_local_nameserver = true;
         }
     }
 }

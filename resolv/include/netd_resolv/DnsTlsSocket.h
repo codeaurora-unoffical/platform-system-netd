@@ -26,8 +26,9 @@
 #include <netdutils/Slice.h>
 #include <netdutils/Status.h>
 
-#include "dns/DnsTlsServer.h"
-#include "dns/IDnsTlsSocket.h"
+#include "DnsTlsServer.h"
+#include "IDnsTlsSocket.h"
+#include "params.h"
 
 namespace android {
 namespace net {
@@ -46,7 +47,7 @@ using netdutils::Slice;
 // This class may call the observer at any time after initialize(), until the destructor
 // returns (but not after).
 class DnsTlsSocket : public IDnsTlsSocket {
-public:
+  public:
     DnsTlsSocket(const DnsTlsServer& server, unsigned mark,
                  IDnsTlsSocketObserver* _Nonnull observer,
                  DnsTlsSessionCache* _Nonnull cache) :

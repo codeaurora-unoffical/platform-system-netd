@@ -1757,7 +1757,6 @@ static void resolv_set_default_params(struct __res_params* params) {
 
 int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigned numservers,
                                    const char* domains, const __res_params* params) {
-    char sbuf[NI_MAXSERV];
     char* cp;
     int* offset;
     struct addrinfo* nsaddrinfo[MAXNS];
@@ -1769,18 +1768,19 @@ int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigne
 
     // Parse the addresses before actually locking or changing any state, in case there is an error.
     // As a side effect this also reduces the time the lock is kept.
-    struct addrinfo hints = {
-            .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM, .ai_flags = AI_NUMERICHOST};
+    char sbuf[NI_MAXSERV];
     snprintf(sbuf, sizeof(sbuf), "%u", NAMESERVER_PORT);
     for (unsigned i = 0; i < numservers; i++) {
         // The addrinfo structures allocated here are freed in free_nameservers_locked().
-        int rt = getaddrinfo(servers[i], sbuf, &hints, &nsaddrinfo[i]);
+        const addrinfo hints = {
+                .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM, .ai_flags = AI_NUMERICHOST};
+        int rt = getaddrinfo_numeric(servers[i], sbuf, hints, &nsaddrinfo[i]);
         if (rt != 0) {
-            for (unsigned j = 0; j < i; j++) {
+            for (int j = 0; j < i; j++) {
                 freeaddrinfo(nsaddrinfo[j]);
-                nsaddrinfo[j] = NULL;
             }
-            VLOG << __func__ << ": getaddrinfo(" << servers[i] << ") = " << gai_strerror(rt);
+            VLOG << __func__ << ": getaddrinfo_numeric(" << servers[i]
+                 << ") = " << gai_strerror(rt);
             return EINVAL;
         }
     }
@@ -1820,14 +1820,19 @@ int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigne
             // max_samples actually change, in practice the overhead of checking is higher than the
             // cost, and overflows are unlikely
             ++cache_info->revision_id;
-        } else if (cache_info->params.max_samples != old_max_samples) {
-            // If the maximum number of samples changes, the overhead of keeping the most recent
-            // samples around is not considered worth the effort, so they are cleared instead. All
-            // other parameters do not affect shared state: Changing these parameters does not
-            // invalidate the samples, as they only affect aggregation and the conditions under
-            // which servers are considered usable.
-            res_cache_clear_stats_locked(cache_info);
-            ++cache_info->revision_id;
+        } else {
+            if (cache_info->params.max_samples != old_max_samples) {
+                // If the maximum number of samples changes, the overhead of keeping the most recent
+                // samples around is not considered worth the effort, so they are cleared instead.
+                // All other parameters do not affect shared state: Changing these parameters does
+                // not invalidate the samples, as they only affect aggregation and the conditions
+                // under which servers are considered usable.
+                res_cache_clear_stats_locked(cache_info);
+                ++cache_info->revision_id;
+            }
+            for (int j = 0; j < numservers; j++) {
+                freeaddrinfo(nsaddrinfo[j]);
+            }
         }
 
         // Always update the search paths, since determining whether they actually changed is

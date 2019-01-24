@@ -1,5 +1,6 @@
 cc_library_shared {
     name: "libnetd_resolv",
+    version_script: "libnetd_resolv.map.txt",
     defaults: ["netd_defaults"],
     srcs: [
         "getaddrinfo.cpp",
@@ -7,7 +8,6 @@ cc_library_shared {
         "sethostent.cpp",
         "res_cache.cpp",
         "res_comp.cpp",
-        "res_data.cpp",
         "res_debug.cpp",
         "res_init.cpp",
         "res_mkquery.cpp",
@@ -15,21 +15,23 @@ cc_library_shared {
         "res_send.cpp",
         "res_state.cpp",
         "res_stats.cpp",
+        "DnsTlsDispatcher.cpp",
+        "DnsTlsQueryMap.cpp",
+        "DnsTlsTransport.cpp",
+        "DnsTlsServer.cpp",
+        "DnsTlsSessionCache.cpp",
+        "DnsTlsSocket.cpp",
+        "PrivateDnsConfiguration.cpp",
     ],
     // Link everything statically (except for libc) to minimize our dependence
     // on system ABIs
     stl: "libc++_static",
     static_libs: [
         "libbase",
+        "libcrypto",
         "liblog",
-    ],
-    // Only export the symbols that we explicitly mark as visible
-    cflags: [
-        "-fvisibility=hidden",
-    ],
-    // Also hide symbols defined by the static libraries we depend on
-    ldflags: [
-        "-Wl,--exclude-libs,ALL",
+        "libnetdutils",
+        "libssl",
     ],
     export_include_dirs: ["include"],
     // TODO: pie in the sky: make this code clang-tidy clean
@@ -41,4 +43,33 @@ cc_library_shared {
             ],
         },
     },
+}
+
+cc_test {
+    name: "libnetd_resolv_test",
+    defaults: ["netd_defaults"],
+    // Add DnsTls* files since they are not visible outside libnetd_resolv library.
+    srcs: [
+        "DnsTlsDispatcher.cpp",
+        "DnsTlsQueryMap.cpp",
+        "DnsTlsTransport.cpp",
+        "DnsTlsServer.cpp",
+        "DnsTlsSessionCache.cpp",
+        "DnsTlsSocket.cpp",
+        "dns_tls_test.cpp",
+    ],
+    // TODO: Remove the include path "system/netd/include" after Fwmark used in DnsTlsTransport is
+    // moved out.
+    include_dirs: [
+        "system/netd/include",
+        "system/netd/resolv/include",
+        "system/netd/server",
+    ],
+    shared_libs: [
+        "libbase",
+        "libcrypto",
+        "liblog",
+        "libnetdutils",
+        "libssl",
+    ],
 }

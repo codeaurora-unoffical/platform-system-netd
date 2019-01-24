@@ -25,11 +25,12 @@
 #include <android-base/thread_annotations.h>
 #include <android-base/unique_fd.h>
 
-#include "dns/DnsTlsSessionCache.h"
-#include "dns/DnsTlsQueryMap.h"
-#include "dns/DnsTlsServer.h"
-#include "dns/IDnsTlsSocket.h"
-#include "dns/IDnsTlsSocketObserver.h"
+#include "DnsTlsQueryMap.h"
+#include "DnsTlsServer.h"
+#include "DnsTlsSessionCache.h"
+#include "IDnsTlsSocket.h"
+#include "IDnsTlsSocketObserver.h"
+#include "params.h"
 
 #include <netdutils/Slice.h>
 
@@ -41,7 +42,7 @@ class IDnsTlsSocketFactory;
 // Manages at most one DnsTlsSocket at a time.  This class handles socket lifetime issues,
 // such as reopening the socket and reissuing pending queries.
 class DnsTlsTransport : public IDnsTlsSocketObserver {
-public:
+  public:
     DnsTlsTransport(const DnsTlsServer& server, unsigned mark,
                     IDnsTlsSocketFactory* _Nonnull factory) :
             mMark(mark), mServer(server), mFactory(factory) {}
@@ -56,7 +57,7 @@ public:
     // Check that a given TLS server is fully working on the specified netid, and has the
     // provided SHA-256 fingerprint (if nonempty).  This function is used in ResolverController
     // to ensure that we don't enable DNS over TLS on networks where it doesn't actually work.
-    static bool validate(const DnsTlsServer& server, unsigned netid);
+    static bool validate(const DnsTlsServer& server, unsigned netid, uint32_t mark);
 
     // Implement IDnsTlsSocketObserver
     void onResponse(std::vector<uint8_t> response) override;

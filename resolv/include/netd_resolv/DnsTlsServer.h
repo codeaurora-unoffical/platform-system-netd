@@ -23,6 +23,8 @@
 
 #include <netinet/in.h>
 
+#include "params.h"
+
 namespace android {
 namespace net {
 

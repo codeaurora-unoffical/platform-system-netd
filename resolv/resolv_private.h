@@ -59,6 +59,7 @@
 #include <time.h>
 
 #include "netd_resolv/params.h"
+#include "netd_resolv/resolv.h"
 #include "netd_resolv/stats.h"
 #include "resolv_static.h"
 
@@ -125,8 +126,6 @@ struct __res_state {
         struct in_addr addr;
         uint32_t mask;
     } sort_list[MAXRESOLVSORT];
-    res_send_qhook qhook; /* query hook */
-    res_send_rhook rhook; /* response hook */
     int res_h_errno;      /* last one set for this context */
     unsigned _mark;       /* If non-0 SET_MARK to _mark on all request sockets */
     int _vcsock;          /* PRIVATE: for res_send VC i/o */
@@ -143,6 +142,7 @@ struct __res_state {
         } _ext;
     } _u;
     struct res_static rstatic[1];
+    bool use_local_nameserver; /* DNS-over-TLS bypass */
 };
 
 typedef struct __res_state* res_state;
@@ -165,19 +165,6 @@ int _res_stats_calculate_rtt(const timespec* t1, const timespec* t0);
 void _res_stats_set_sample(res_sample* sample, time_t now, int rcode, int rtt);
 
 /* End of stats related definitions */
-
-union res_sockaddr_union {
-    struct sockaddr_in sin;
-#ifdef IN6ADDR_ANY_INIT
-    struct sockaddr_in6 sin6;
-#endif
-#ifdef ISC_ALIGN64
-    int64_t __align64; /* 64bit alignment */
-#else
-    int32_t __align32; /* 32bit alignment */
-#endif
-    char __space[128]; /* max size */
-};
 
 /*
  * Resolver flags (used to be discrete per-module statics ints).
@@ -246,17 +233,10 @@ union res_sockaddr_union {
 #define RES_PRF_TRUNC 0x00008000
 /*			0x00010000	*/
 
+extern const char* const _res_opcodes[];
+
 /* Things involving an internal (static) resolver context. */
 struct __res_state* res_get_state(void);
-void res_put_state(struct __res_state*);
-
-void res_close(void);
-int res_init(void);
-int res_mkquery(int, const char*, int, int, const u_char*, int, const u_char*, u_char*, int);
-int res_query(const char*, int, int, u_char*, int);
-int res_search(const char*, int, int, u_char*, int);
-int res_send(const u_char*, int, u_char*, int);
-int res_sendsigned(const u_char*, int, ns_tsig_key*, u_char*, int);
 
 int res_hnok(const char*);
 int res_ownok(const char*);
@@ -277,28 +257,32 @@ int res_queriesmatch(const u_char*, const u_char*, const u_char*, const u_char*)
 const char* p_section(int, int);
 /* Things involving a resolver context. */
 int res_ninit(res_state);
-void fp_resstat(const res_state, FILE*);
 void res_pquery(const res_state, const u_char*, int, FILE*);
-int res_nquery(res_state, const char*, int, int, u_char*, int);
-int res_nsearch(res_state, const char*, int, int, u_char*, int);
-int res_nquerydomain(res_state, const char*, const char*, int, int, u_char*, int);
+int res_nquery(res_state, const char*, int, int, u_char*, int, int*);
+int res_nsearch(res_state, const char*, int, int, u_char*, int, int*);
+int res_nquerydomain(res_state, const char*, const char*, int, int, u_char*, int, int*);
 int res_nmkquery(res_state, int, const char*, int, int, const u_char*, int, const u_char*, u_char*,
                  int);
-int res_nsend(res_state, const u_char*, int, u_char*, int);
-int res_nsendsigned(res_state, const u_char*, int, ns_tsig_key*, u_char*, int);
-int res_findzonecut(res_state, const char*, ns_class, int, char*, size_t, struct in_addr*, int);
-int res_findzonecut2(res_state, const char*, ns_class, int, char*, size_t,
-                     union res_sockaddr_union*, int);
+int res_nsend(res_state, const u_char*, int, u_char*, int, int*);
 void res_nclose(res_state);
 int res_nopt(res_state, int, u_char*, int, int);
 int res_vinit(res_state, int);
 void res_ndestroy(res_state);
-void res_setservers(res_state, const union res_sockaddr_union*, int);
-int res_getservers(res_state, union res_sockaddr_union*, int);
+void res_setservers(res_state, const sockaddr_union*, int);
+int res_getservers(res_state, sockaddr_union*, int);
 
 struct android_net_context; /* forward */
 void res_setnetcontext(res_state, const struct android_net_context*);
 
 u_int res_randomid(void);
+
+int getaddrinfo_numeric(const char* hostname, const char* servname, addrinfo hints,
+                        addrinfo** result);
+
+// Helper function for converting h_errno to the error codes visible to netd
+int herrnoToAiError(int herrno);
+
+// Helper function for converting rcode to the error codes visible to netd
+int rcodeToAiError(int rcode);
 
 #endif  // NETD_RESOLV_PRIVATE_H

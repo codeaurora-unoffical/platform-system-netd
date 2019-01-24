@@ -31,8 +31,16 @@ aidl_interface {
     local_include_dir: "binder",
     srcs: [
         "binder/android/net/TetherStatsParcel.aidl",
+        "binder/android/net/UidRangeParcel.aidl",
+        "binder/android/net/InterfaceConfigurationParcel.aidl",
     ],
     api_dir: "binder/api",
+    // NDK doesn't support array now.
+    backend: {
+        ndk: {
+            enabled: false,
+        },
+    },
 }
 
 cc_library {
@@ -43,6 +51,9 @@ cc_library {
         "libutils",
         "netd_aidl_interface-cpp",
     ],
+    export_shared_lib_headers: [
+        "netd_aidl_interface-cpp",
+    ],
     aidl: {
         export_aidl_headers: true,
         local_include_dirs: ["binder"],
@@ -50,7 +61,6 @@ cc_library {
     },
     srcs: [
         ":netd_aidl",
-        "binder/android/net/UidRange.cpp",
     ],
     export_include_dirs: ["binder"],
 }
@@ -66,6 +76,7 @@ cc_library_static {
     srcs: [
         "BandwidthController.cpp",
         "Controllers.cpp",
+        "Dns64Configuration.cpp",
         "NetdConstants.cpp",
         "FirewallController.cpp",
         "IdletimerController.cpp",
@@ -87,7 +98,7 @@ cc_library_static {
         ":netd_metrics_aidl",
     ],
     shared_libs: [
-        "libbpf",
+        "libbpf_android",
         "libnetd_resolv",
         "libnetdaidl",
         "libbase",
@@ -99,7 +110,6 @@ cc_library_static {
         "libpcap",
         "libqtaguid",
         "libssl",
-        "netd_aidl_interface-cpp",
     ],
     aidl: {
         export_aidl_headers: true,
@@ -120,7 +130,7 @@ cc_binary {
         "android.system.net.netd@1.1",
         "libbase",
         "libbinder",
-        "libbpf",
+        "libbpf_android",
         "libcrypto",
         "libcutils",
         "libdl",
@@ -137,14 +147,12 @@ cc_binary {
         "libpcap",
         "libqtaguid",
         "libselinux",
-        "libssl",
         "libsysutils",
         "libutils",
         "netd_aidl_interface-cpp",
     ],
     static_libs: [
         "libnetd_server",
-        "libnetddns",
     ],
     srcs: [
         "ClatdController.cpp",
@@ -210,12 +218,11 @@ cc_test {
         "libgmock",
         "libnetd_server",
         "libnetd_test_tun_interface",
-        "libnetddns",
     ],
     shared_libs: [
         "libbase",
         "libbinder",
-        "libbpf",
+        "libbpf_android",
         "libcrypto",
         "libcutils",
         "liblog",
