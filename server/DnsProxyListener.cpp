@@ -37,12 +37,14 @@
 #include <list>
 #include <vector>
 
+#include <android-base/stringprintf.h>
 #include <cutils/misc.h>
 #include <log/log.h>
 #include <netdutils/OperationLimiter.h>
 #include <netdutils/Slice.h>
-#include <utils/String16.h>
+#include <resolv.h>
 #include <sysutils/SocketClient.h>
+#include <utils/String16.h>
 
 #include <binder/IServiceManager.h>
 
@@ -57,7 +59,10 @@
 #include "android/net/metrics/INetdEventListener.h"
 #include "thread_util.h"
 
+#include <netd_resolv/resolv_stub.h>
+
 using android::String16;
+using android::base::StringPrintf;
 using android::net::metrics::INetdEventListener;
 
 namespace android {
@@ -73,6 +78,10 @@ constexpr const char NETWORK_BYPASS_PRIVATE_DNS[] =
 
 // Limits the number of outstanding DNS queries by client UID.
 constexpr int MAX_QUERIES_PER_UID = 256;
+
+// Max packet size for answer, sync with getaddrinfo.c
+constexpr int MAXPACKET = 8 * 1024;
+
 android::netdutils::OperationLimiter<uid_t> queryLimiter(MAX_QUERIES_PER_UID);
 
 void logArguments(int argc, char** argv) {
@@ -114,10 +123,15 @@ constexpr bool requestingUseLocalNameservers(unsigned flags) {
 
 inline bool queryingViaTls(unsigned dns_netid) {
     ExternalPrivateDnsStatus privateDnsStatus = {PrivateDnsMode::OFF, 0, {}};
-    resolv_get_private_dns_status_for_net(dns_netid, &privateDnsStatus);
+    RESOLV_STUB.resolv_get_private_dns_status_for_net(dns_netid, &privateDnsStatus);
     switch (static_cast<PrivateDnsMode>(privateDnsStatus.mode)) {
         case PrivateDnsMode::OPPORTUNISTIC:
-            return privateDnsStatus.numServers != 0;
+            for (unsigned i = 0; i < privateDnsStatus.numServers; i++) {
+                if (privateDnsStatus.serverStatus[i].validation == Validation::success) {
+                    return true;
+                }
+            }
+            return false;
         case PrivateDnsMode::STRICT:
             return true;
         default:
@@ -132,7 +146,8 @@ bool hasPermissionToBypassPrivateDns(uid_t uid) {
         return true;
     }
 
-    for (auto& permission : {CONNECTIVITY_USE_RESTRICTED_NETWORKS, NETWORK_BYPASS_PRIVATE_DNS}) {
+    for (const char* const permission :
+         {CONNECTIVITY_USE_RESTRICTED_NETWORKS, NETWORK_BYPASS_PRIVATE_DNS}) {
         if (checkCallingPermission(String16(permission))) {
             return true;
         }
@@ -156,6 +171,233 @@ void maybeFixupNetContext(android_net_context* ctx) {
     }
 }
 
+void addIpAddrWithinLimit(std::vector<android::String16>* ip_addrs, const sockaddr* addr,
+                          socklen_t addrlen);
+
+int extractIpAddressAnswers(const uint8_t* answer, size_t anslen, int ipType,
+                            std::vector<String16>* ip_addrs) {
+    int total_ip_addr_count = 0;
+    ns_msg handle;
+    if (ns_initparse((const uint8_t*) answer, anslen, &handle) < 0) {
+        return 0;
+    }
+    int ancount = ns_msg_count(handle, ns_s_an);
+    ns_rr rr;
+    for (int i = 0; i < ancount; i++) {
+        if (ns_parserr(&handle, ns_s_an, i, &rr) < 0) {
+            continue;
+        }
+        const uint8_t* rdata = ns_rr_rdata(rr);
+        if (ipType == ns_t_a) {
+            sockaddr_in sin = {.sin_family = AF_INET};
+            memcpy(&sin.sin_addr, rdata, sizeof(sin.sin_addr));
+            addIpAddrWithinLimit(ip_addrs, (sockaddr*) &sin, sizeof(sin));
+            total_ip_addr_count++;
+        } else if (ipType == ns_t_aaaa) {
+            struct in6_addr in6;
+            memcpy(&in6, rdata, IN6ADDRSZ);
+            sockaddr_in6 sin6 = {.sin6_family = AF_INET6, .sin6_addr = in6};
+            addIpAddrWithinLimit(ip_addrs, (sockaddr*) &sin6, sizeof(sin6));
+            total_ip_addr_count++;
+        }
+    }
+
+    return total_ip_addr_count;
+}
+
+template <typename IntegralType>
+bool simpleStrtoul(const char* input, IntegralType* output, int base = 10) {
+    char* endPtr;
+    errno = 0;
+    auto result = strtoul(input, &endPtr, base);
+    // Check the length in order to ensure there is no "-" sign
+    if (!*input || *endPtr || (endPtr - input) != static_cast<ptrdiff_t>(strlen(input)) ||
+        (errno == ERANGE && (result == ULONG_MAX))) {
+        return false;
+    }
+    *output = result;
+    return true;
+}
+
+bool parseQuery(const uint8_t* msg, size_t msgLen, int* rr_type, std::string* rr_name) {
+    ns_msg handle;
+    ns_rr rr;
+    if (ns_initparse((const uint8_t*) msg, msgLen, &handle) < 0 ||
+        ns_parserr(&handle, ns_s_qd, 0, &rr) < 0) {
+        return false;
+    }
+
+    *rr_name = ns_rr_name(rr);
+    *rr_type = ns_rr_type(rr);
+    return true;
+}
+
+bool onlyIPv4Answers(const struct addrinfo* res) {
+    // Null addrinfo pointer isn't checked because the caller doesn't pass null pointer.
+
+    for (const struct addrinfo* ai = res; ai; ai = ai->ai_next)
+        if (ai->ai_family != AF_INET) return false;
+
+    return true;
+}
+
+bool isSpecialUseIPv4Address(const struct in_addr& ia) {
+    const uint32_t addr = ntohl(ia.s_addr);
+
+    // Only check necessary IP ranges in RFC 5735 section 4
+    return ((addr & 0xff000000) == 0x00000000) ||  // "This" Network
+           ((addr & 0xff000000) == 0x7f000000) ||  // Loopback
+           ((addr & 0xffff0000) == 0xa9fe0000) ||  // Link Local
+           ((addr & 0xf0000000) == 0xe0000000) ||  // Multicast
+           (addr == INADDR_BROADCAST);             // Limited Broadcast
+}
+
+bool isSpecialUseIPv4Address(const struct sockaddr* sa) {
+    if (sa->sa_family != AF_INET) return false;
+
+    return isSpecialUseIPv4Address(((struct sockaddr_in*) sa)->sin_addr);
+}
+
+bool onlyNonSpecialUseIPv4Addresses(struct hostent* hp) {
+    // Null hostent pointer isn't checked because the caller doesn't pass null pointer.
+
+    if (hp->h_addrtype != AF_INET) return false;
+
+    for (int i = 0; hp->h_addr_list[i] != nullptr; i++)
+        if (isSpecialUseIPv4Address(*(struct in_addr*) hp->h_addr_list[i])) return false;
+
+    return true;
+}
+
+bool onlyNonSpecialUseIPv4Addresses(const struct addrinfo* res) {
+    // Null addrinfo pointer isn't checked because the caller doesn't pass null pointer.
+
+    for (const struct addrinfo* ai = res; ai; ai = ai->ai_next) {
+        if (ai->ai_family != AF_INET) return false;
+        if (isSpecialUseIPv4Address(ai->ai_addr)) return false;
+    }
+
+    return true;
+}
+
+void logDnsQueryResult(const struct hostent* hp) {
+    if (hp == nullptr) return;
+
+    ALOGD("DNS records:");
+    for (int i = 0; hp->h_addr_list[i] != nullptr; i++) {
+        char ip_addr[INET6_ADDRSTRLEN];
+        if (inet_ntop(hp->h_addrtype, hp->h_addr_list[i], ip_addr, sizeof(ip_addr)) != nullptr) {
+            ALOGD("[%d] %s, %d, %d, %s (%p)", i, hp->h_name ? hp->h_name : "null", hp->h_addrtype,
+                  hp->h_length, ip_addr, hp->h_addr_list[i]);
+        } else {
+            ALOGD("[%d] numeric hostname translation fail (%d)", i, errno);
+        }
+    }
+}
+
+void logDnsQueryResult(const struct addrinfo* res) {
+    if (res == nullptr) return;
+
+    int i;
+    const struct addrinfo* ai;
+    ALOGD("DNS records:");
+    for (ai = res, i = 0; ai; ai = ai->ai_next, i++) {
+        if ((ai->ai_family != AF_INET) && (ai->ai_family != AF_INET6)) continue;
+        char ip_addr[INET6_ADDRSTRLEN];
+        int ret = getnameinfo(ai->ai_addr, ai->ai_addrlen, ip_addr, sizeof(ip_addr), nullptr, 0,
+                              NI_NUMERICHOST);
+        if (!ret) {
+            ALOGD("[%d] 0x%x,%d,%d,%d,%d,%s,%s,%p", i, ai->ai_flags, ai->ai_family, ai->ai_socktype,
+                  ai->ai_protocol, ai->ai_addrlen, ai->ai_canonname ? ai->ai_canonname : "null",
+                  ip_addr, ai);
+        } else {
+            ALOGD("[%d] numeric hostname translation fail (%d)", i, ret);
+        }
+    }
+}
+
+bool isValidNat64Prefix(const netdutils::IPPrefix prefix) {
+    if (prefix.family() != AF_INET6) {
+        ALOGE("Only IPv6 NAT64 prefixes are supported (%u)", prefix.family());
+        return false;
+    }
+    if (prefix.length() != 96) {
+        ALOGE("Only /96 NAT64 prefixes are supported (%d)", prefix.length());
+        return false;
+    }
+    return true;
+}
+
+bool synthesizeNat64PrefixWithARecord(const netdutils::IPPrefix& prefix, struct hostent* hp) {
+    if (hp == nullptr) return false;
+    if (!onlyNonSpecialUseIPv4Addresses(hp)) return false;
+    if (!isValidNat64Prefix(prefix)) return false;
+
+    struct sockaddr_storage ss = netdutils::IPSockAddr(prefix.ip());
+    struct sockaddr_in6* v6prefix = (struct sockaddr_in6*) &ss;
+    for (int i = 0; hp->h_addr_list[i] != nullptr; i++) {
+        struct in_addr iaOriginal = *(struct in_addr*) hp->h_addr_list[i];
+        struct in6_addr* ia6 = (struct in6_addr*) hp->h_addr_list[i];
+        memset(ia6, 0, sizeof(struct in6_addr));
+
+        // Synthesize /96 NAT64 prefix in place. The space has reserved by getanswer() and
+        // _hf_gethtbyname2() in system/netd/resolv/gethnamaddr.cpp and
+        // system/netd/resolv/sethostent.cpp.
+        *ia6 = v6prefix->sin6_addr;
+        ia6->s6_addr32[3] = iaOriginal.s_addr;
+
+        if (DBG) {
+            char buf[INET6_ADDRSTRLEN];  // big enough for either IPv4 or IPv6
+            inet_ntop(AF_INET, &iaOriginal.s_addr, buf, sizeof(buf));
+            ALOGD("DNS A record: %s", buf);
+            inet_ntop(AF_INET6, &v6prefix->sin6_addr, buf, sizeof(buf));
+            ALOGD("NAT64 prefix: %s", buf);
+            inet_ntop(AF_INET6, ia6, buf, sizeof(buf));
+            ALOGD("DNS64 Synthesized AAAA record: %s", buf);
+        }
+    }
+    hp->h_addrtype = AF_INET6;
+    hp->h_length = sizeof(in6_addr);
+
+    if (DBG) logDnsQueryResult(hp);
+    return true;
+}
+
+bool synthesizeNat64PrefixWithARecord(const netdutils::IPPrefix& prefix, struct addrinfo* result) {
+    if (result == nullptr) return false;
+    if (!onlyNonSpecialUseIPv4Addresses(result)) return false;
+    if (!isValidNat64Prefix(prefix)) return false;
+
+    struct sockaddr_storage ss = netdutils::IPSockAddr(prefix.ip());
+    struct sockaddr_in6* v6prefix = (struct sockaddr_in6*) &ss;
+    for (struct addrinfo* ai = result; ai; ai = ai->ai_next) {
+        struct sockaddr_in sinOriginal = *(struct sockaddr_in*) ai->ai_addr;
+        struct sockaddr_in6* sin6 = (struct sockaddr_in6*) ai->ai_addr;
+        memset(sin6, 0, sizeof(sockaddr_in6));
+
+        // Synthesize /96 NAT64 prefix in place. The space has reserved by get_ai() in
+        // system/netd/resolv/getaddrinfo.cpp.
+        sin6->sin6_addr = v6prefix->sin6_addr;
+        sin6->sin6_addr.s6_addr32[3] = sinOriginal.sin_addr.s_addr;
+        sin6->sin6_family = AF_INET6;
+        sin6->sin6_port = sinOriginal.sin_port;
+        ai->ai_addrlen = sizeof(struct sockaddr_in6);
+        ai->ai_family = AF_INET6;
+
+        if (DBG) {
+            char buf[INET6_ADDRSTRLEN];  // big enough for either IPv4 or IPv6
+            inet_ntop(AF_INET, &sinOriginal.sin_addr.s_addr, buf, sizeof(buf));
+            ALOGD("DNS A record: %s", buf);
+            inet_ntop(AF_INET6, &v6prefix->sin6_addr, buf, sizeof(buf));
+            ALOGD("NAT64 prefix: %s", buf);
+            inet_ntop(AF_INET6, &sin6->sin6_addr, buf, sizeof(buf));
+            ALOGD("DNS64 Synthesized AAAA record: %s", buf);
+        }
+    }
+    if (DBG) logDnsQueryResult(result);
+    return true;
+}
+
 }  // namespace
 
 DnsProxyListener::DnsProxyListener(const NetworkController* netCtrl, EventReporter* eventReporter) :
@@ -163,6 +405,7 @@ DnsProxyListener::DnsProxyListener(const NetworkController* netCtrl, EventReport
     registerCmd(new GetAddrInfoCmd(this));
     registerCmd(new GetHostByAddrCmd(this));
     registerCmd(new GetHostByNameCmd(this));
+    registerCmd(new ResNSendCommand(this));
 }
 
 DnsProxyListener::GetAddrInfoHandler::GetAddrInfoHandler(
@@ -259,6 +502,55 @@ static bool sendaddrinfo(SocketClient* c, struct addrinfo* ai) {
     return true;
 }
 
+void DnsProxyListener::GetAddrInfoHandler::doDns64Synthesis(int32_t* rv, struct addrinfo** res) {
+    if (mHost == nullptr) return;
+
+    const bool ipv6WantedButNoData = (mHints && mHints->ai_family == AF_INET6 && *rv == EAI_NODATA);
+    const bool unspecWantedButNoIPv6 =
+            ((!mHints || mHints->ai_family == AF_UNSPEC) && *rv == 0 && onlyIPv4Answers(*res));
+
+    if (!ipv6WantedButNoData && !unspecWantedButNoIPv6) {
+        return;
+    }
+
+    netdutils::IPPrefix prefix{};
+    if (net::gCtls->resolverCtrl.getPrefix64(mNetContext.dns_netid, &prefix)) {
+        return;
+    }
+
+    if (ipv6WantedButNoData) {
+        // If caller wants IPv6 answers but no data, try to query IPv4 answers for synthesis
+        const uid_t uid = mClient->getUid();
+        if (queryLimiter.start(uid)) {
+            mHints->ai_family = AF_INET;
+            // Don't need to do freeaddrinfo(res) before starting new DNS lookup because previous
+            // DNS lookup is failed with error EAI_NODATA.
+            *rv = RESOLV_STUB.android_getaddrinfofornetcontext(mHost, mService, mHints,
+                                                               &mNetContext, res);
+            queryLimiter.finish(uid);
+            if (*rv) {
+                *rv = EAI_NODATA;  // return original error code
+                return;
+            }
+        } else {
+            ALOGE("getaddrinfo: from UID %d, max concurrent queries reached", uid);
+            return;
+        }
+    }
+
+    if (!synthesizeNat64PrefixWithARecord(prefix, *res)) {
+        if (ipv6WantedButNoData) {
+            // If caller wants IPv6 answers but no data and failed to synthesize IPv6 answers,
+            // don't return the IPv4 answers.
+            *rv = EAI_NODATA;  // return original error code
+            if (*res) {
+                freeaddrinfo(*res);
+                *res = nullptr;
+            }
+        }
+    }
+}
+
 void DnsProxyListener::GetAddrInfoHandler::run() {
     if (DBG) {
         ALOGD("GetAddrInfoHandler, now for %s / %s / {%u,%u,%u,%u,%u,%u}", mHost, mService,
@@ -273,7 +565,8 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
     const uid_t uid = mClient->getUid();
     int32_t rv = 0;
     if (queryLimiter.start(uid)) {
-        rv = android_getaddrinfofornetcontext(mHost, mService, mHints, &mNetContext, &result);
+        rv = RESOLV_STUB.android_getaddrinfofornetcontext(mHost, mService, mHints, &mNetContext,
+                                                          &result);
         queryLimiter.finish(uid);
     } else {
         // Note that this error code is currently not passed down to the client.
@@ -282,6 +575,8 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
         ALOGE("getaddrinfo: from UID %d, max concurrent queries reached", uid);
     }
     const int latencyMs = lround(s.timeTaken());
+
+    doDns64Synthesis(&rv, &result);
 
     if (rv) {
         // getaddrinfo failed
@@ -306,7 +601,7 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
             for (addrinfo* ai = result; ai; ai = ai->ai_next) {
                 sockaddr* ai_addr = ai->ai_addr;
                 if (ai_addr) {
-                    addIpAddrWithinLimit(ip_addrs, ai_addr, ai->ai_addrlen);
+                    addIpAddrWithinLimit(&ip_addrs, ai_addr, ai->ai_addrlen);
                     total_ip_addr_count++;
                 }
             }
@@ -338,18 +633,22 @@ void DnsProxyListener::GetAddrInfoHandler::run() {
     }
 }
 
-void DnsProxyListener::addIpAddrWithinLimit(std::vector<android::String16>& ip_addrs,
-        const sockaddr* addr, socklen_t addrlen) {
+namespace {
+
+void addIpAddrWithinLimit(std::vector<android::String16>* ip_addrs, const sockaddr* addr,
+                          socklen_t addrlen) {
     // ipAddresses array is limited to first INetdEventListener::DNS_REPORTED_IP_ADDRESSES_LIMIT
     // addresses for A and AAAA. Total count of addresses is provided, to be able to tell whether
     // some addresses didn't get logged.
-    if (ip_addrs.size() < INetdEventListener::DNS_REPORTED_IP_ADDRESSES_LIMIT) {
+    if (ip_addrs->size() < INetdEventListener::DNS_REPORTED_IP_ADDRESSES_LIMIT) {
         char ip_addr[INET6_ADDRSTRLEN];
         if (getnameinfo(addr, addrlen, ip_addr, sizeof(ip_addr), nullptr, 0, NI_NUMERICHOST) == 0) {
-            ip_addrs.push_back(String16(ip_addr));
+            ip_addrs->push_back(String16(ip_addr));
         }
     }
 }
+
+}  // namespace
 
 DnsProxyListener::GetAddrInfoCmd::GetAddrInfoCmd(DnsProxyListener* dnsProxyListener) :
     NetdCommand("getaddrinfo"),
@@ -384,10 +683,10 @@ int DnsProxyListener::GetAddrInfoCmd::runCommand(SocketClient *cli,
     }
 
     struct addrinfo* hints = nullptr;
-    int ai_flags = atoi(argv[3]);
-    int ai_family = atoi(argv[4]);
-    int ai_socktype = atoi(argv[5]);
-    int ai_protocol = atoi(argv[6]);
+    int ai_flags = strtol(argv[3], nullptr, 10);
+    int ai_family = strtol(argv[4], nullptr, 10);
+    int ai_socktype = strtol(argv[5], nullptr, 10);
+    int ai_protocol = strtol(argv[6], nullptr, 10);
     unsigned netId = strtoul(argv[7], nullptr, 10);
     const bool useLocalNameservers = checkAndClearUseLocalNameserversFlag(&netId);
     const uid_t uid = cli->getUid();
@@ -426,6 +725,152 @@ int DnsProxyListener::GetAddrInfoCmd::runCommand(SocketClient *cli,
 }
 
 /*******************************************************
+ *                  ResNSendCommand                  *
+ *******************************************************/
+DnsProxyListener::ResNSendCommand::ResNSendCommand(DnsProxyListener* dnsProxyListener)
+    : NetdCommand("resnsend"), mDnsProxyListener(dnsProxyListener) {}
+
+int DnsProxyListener::ResNSendCommand::runCommand(SocketClient* cli, int argc, char** argv) {
+    if (DBG) logArguments(argc, argv);
+
+    const uid_t uid = cli->getUid();
+    if (argc != 3) {
+        ALOGW("resnsend: from UID %d, invalid number of arguments to resnsend: %d", uid, argc);
+        sendBE32(cli, -EINVAL);
+        return -1;
+    }
+
+    unsigned netId;
+    if (!simpleStrtoul(argv[2], &netId)) {
+        ALOGW("resnsend: from UID %d, invalid netId", uid);
+        sendBE32(cli, -EINVAL);
+        return -1;
+    }
+
+    android_net_context netcontext;
+    mDnsProxyListener->mNetCtrl->getNetworkContext(netId, uid, &netcontext);
+    if (checkAndClearUseLocalNameserversFlag(&netId)) {
+        netcontext.flags |= NET_CONTEXT_FLAG_USE_LOCAL_NAMESERVERS;
+    }
+    const int metricsLevel = mDnsProxyListener->mEventReporter->getMetricsReportingLevel();
+
+    DnsProxyListener::ResNSendHandler* handler = new DnsProxyListener::ResNSendHandler(
+            cli, argv[1], netcontext, metricsLevel,
+            mDnsProxyListener->mEventReporter->getNetdEventListener());
+    tryThreadOrError(cli, handler);
+    return 0;
+}
+
+DnsProxyListener::ResNSendHandler::ResNSendHandler(
+        SocketClient* c, std::string msg, const android_net_context& netcontext,
+        const int reportingLevel,
+        const android::sp<android::net::metrics::INetdEventListener>& netdEventListener)
+    : mClient(c),
+      mMsg(std::move(msg)),
+      mNetContext(netcontext),
+      mReportingLevel(reportingLevel),
+      mNetdEventListener(netdEventListener) {}
+
+DnsProxyListener::ResNSendHandler::~ResNSendHandler() {
+    mClient->decRef();
+}
+
+void DnsProxyListener::ResNSendHandler::run() {
+    if (DBG) {
+        ALOGD("ResNSendHandler, now for %s / {%u,%u,%u,%u,%u,%u}", mMsg.c_str(),
+              mNetContext.app_netid, mNetContext.app_mark, mNetContext.dns_netid,
+              mNetContext.dns_mark, mNetContext.uid, mNetContext.flags);
+    }
+
+    Stopwatch s;
+    maybeFixupNetContext(&mNetContext);
+
+    // Decode
+    std::vector<uint8_t> msg(MAXPACKET, 0);
+
+    // Max length of mMsg is less than 1024 since the CMD_BUF_SIZE in FrameworkListener is 1024
+    int msgLen = b64_pton(mMsg.c_str(), msg.data(), MAXPACKET);
+    if (msgLen == -1) {
+        // Decode fail
+        sendBE32(mClient, -EILSEQ);
+        return;
+    }
+
+    const uid_t uid = mClient->getUid();
+    int rr_type = 0;
+    std::string rr_name;
+
+    // TODO: Handle the case which is msg contains more than one query
+    // Parse and store query type/name
+    if (!parseQuery(msg.data(), msgLen, &rr_type, &rr_name)) {
+        // If the query couldn't be parsed, block the request.
+        ALOGW("resnsend: from UID %d, invalid query", uid);
+        sendBE32(mClient, -EINVAL);
+        return;
+    }
+
+    // Send DNS query
+    std::vector<uint8_t> ansBuf(MAXPACKET, 0);
+    int arcode, nsendAns = -1;
+    if (queryLimiter.start(uid)) {
+        nsendAns = RESOLV_STUB.resolv_res_nsend(&mNetContext, msg.data(), msgLen, ansBuf.data(),
+                                                MAXPACKET, &arcode);
+        queryLimiter.finish(uid);
+    } else {
+        ALOGW("resnsend: from UID %d, max concurrent queries reached", uid);
+        nsendAns = -EBUSY;
+    }
+
+    const int latencyMs = lround(s.timeTaken());
+
+    // Fail, send -errno
+    if (nsendAns < 0) {
+        sendBE32(mClient, nsendAns);
+        return;
+    }
+
+    // Send rcode
+    if (!sendBE32(mClient, arcode)) {
+        ALOGW("resnsend: failed to send rcode to uid %d: %s", uid, strerror(errno));
+        return;
+    }
+
+    // Send answer
+    if (!sendLenAndData(mClient, nsendAns, ansBuf.data())) {
+        ALOGW("resnsend: failed to send answer to uid %d: %s", uid, strerror(errno));
+        return;
+    }
+
+    // Parse result for statistics
+    if (mNetdEventListener != nullptr) {
+        // TODO: Enable this when we have a INetdEventListener::EVENT_RES_NSEND constant
+        if (0) {
+            switch (mReportingLevel) {
+                case INetdEventListener::REPORTING_LEVEL_NONE:
+                    // Reporting is off.
+                    break;
+                case INetdEventListener::REPORTING_LEVEL_METRICS:
+                    // Metrics reporting is on. Send metrics.
+                    mNetdEventListener->onDnsEvent(
+                            mNetContext.dns_netid, INetdEventListener::EVENT_GETHOSTBYNAME,
+                            nsendAns > 0 ? 0 : nsendAns, latencyMs, String16(""), {}, -1, -1);
+                    break;
+                case INetdEventListener::REPORTING_LEVEL_FULL:
+                    // Full event info reporting is on. Send full info.
+                    std::vector<String16> ip_addrs;
+                    int total_ip_addr_count =
+                            extractIpAddressAnswers(ansBuf.data(), nsendAns, rr_type, &ip_addrs);
+                    mNetdEventListener->onDnsEvent(
+                            mNetContext.dns_netid, INetdEventListener::EVENT_GETHOSTBYNAME,
+                            nsendAns > 0 ? 0 : nsendAns, latencyMs, String16(rr_name.c_str()),
+                            ip_addrs, total_ip_addr_count, uid);
+                    break;
+            }
+        }
+    }
+}
+
+/*******************************************************
  *                  GetHostByName                      *
  *******************************************************/
 DnsProxyListener::GetHostByNameCmd::GetHostByNameCmd(DnsProxyListener* dnsProxyListener) :
@@ -450,7 +895,7 @@ int DnsProxyListener::GetHostByNameCmd::runCommand(SocketClient *cli,
     unsigned netId = strtoul(argv[1], nullptr, 10);
     const bool useLocalNameservers = checkAndClearUseLocalNameserversFlag(&netId);
     char* name = argv[2];
-    int af = atoi(argv[3]);
+    int af = strtol(argv[3], nullptr, 10);
 
     if (strcmp(name, "^") == 0) {
         name = nullptr;
@@ -488,6 +933,41 @@ DnsProxyListener::GetHostByNameHandler::~GetHostByNameHandler() {
     free(mName);
 }
 
+void DnsProxyListener::GetHostByNameHandler::doDns64Synthesis(int32_t* rv, struct hostent** hpp) {
+    netdutils::IPPrefix prefix{};
+    // Don't have to consider family AF_UNSPEC case because gethostbyname{, 2} only supports
+    // family AF_INET or AF_INET6.
+    const bool ipv6WantedButNoData = (mAf == AF_INET6 && *rv == EAI_NODATA);
+
+    if (!ipv6WantedButNoData) {
+        return;
+    }
+
+    if (net::gCtls->resolverCtrl.getPrefix64(mNetContext.dns_netid, &prefix)) {
+        return;
+    }
+
+    // If caller wants IPv6 answers but no data, try to query IPv4 answers for synthesis
+    const uid_t uid = mClient->getUid();
+    if (queryLimiter.start(uid)) {
+        *rv = RESOLV_STUB.android_gethostbynamefornetcontext(mName, AF_INET, &mNetContext, hpp);
+        queryLimiter.finish(uid);
+        if (*rv) {
+            *rv = EAI_NODATA;  // return original error code
+            return;
+        }
+    } else {
+        ALOGE("gethostbyname: from UID %d, max concurrent queries reached", uid);
+        return;
+    }
+
+    if (!synthesizeNat64PrefixWithARecord(prefix, *hpp)) {
+        // If caller wants IPv6 answers but no data and failed to synthesize IPv4 answers,
+        // don't return the IPv4 answers.
+        *hpp = nullptr;
+    }
+}
+
 void DnsProxyListener::GetHostByNameHandler::run() {
     if (DBG) {
         ALOGD("DnsProxyListener::GetHostByNameHandler::run");
@@ -499,13 +979,15 @@ void DnsProxyListener::GetHostByNameHandler::run() {
     struct hostent* hp = nullptr;
     int32_t rv = 0;
     if (queryLimiter.start(uid)) {
-        rv = android_gethostbynamefornetcontext(mName, mAf, &mNetContext, &hp);
+        rv = RESOLV_STUB.android_gethostbynamefornetcontext(mName, mAf, &mNetContext, &hp);
         queryLimiter.finish(uid);
     } else {
         rv = EAI_MEMORY;
         ALOGE("gethostbyname: from UID %d, max concurrent queries reached", uid);
     }
     const int latencyMs = lround(s.timeTaken());
+
+    doDns64Synthesis(&rv, &hp);
 
     if (DBG) {
         ALOGD("GetHostByNameHandler::run gethostbyname errno: %s hp->h_name = %s, name_len = %zu",
@@ -535,14 +1017,14 @@ void DnsProxyListener::GetHostByNameHandler::run() {
                 in_addr** list = (in_addr**) hp->h_addr_list;
                 for (int i = 0; list[i] != nullptr; i++) {
                     sockaddr_in sin = { .sin_family = AF_INET, .sin_addr = *list[i] };
-                    addIpAddrWithinLimit(ip_addrs, (sockaddr*) &sin, sizeof(sin));
+                    addIpAddrWithinLimit(&ip_addrs, (sockaddr*) &sin, sizeof(sin));
                     total_ip_addr_count++;
                 }
             } else if (hp != nullptr && hp->h_addrtype == AF_INET6) {
                 in6_addr** list = (in6_addr**) hp->h_addr_list;
                 for (int i = 0; list[i] != nullptr; i++) {
                     sockaddr_in6 sin6 = { .sin6_family = AF_INET6, .sin6_addr = *list[i] };
-                    addIpAddrWithinLimit(ip_addrs, (sockaddr*) &sin6, sizeof(sin6));
+                    addIpAddrWithinLimit(&ip_addrs, (sockaddr*) &sin6, sizeof(sin6));
                     total_ip_addr_count++;
                 }
             }
@@ -593,8 +1075,8 @@ int DnsProxyListener::GetHostByAddrCmd::runCommand(SocketClient *cli,
     }
 
     char* addrStr = argv[1];
-    int addrLen = atoi(argv[2]);
-    int addrFamily = atoi(argv[3]);
+    int addrLen = strtol(argv[2], nullptr, 10);
+    int addrFamily = strtol(argv[3], nullptr, 10);
     uid_t uid = cli->getUid();
     unsigned netId = strtoul(argv[4], nullptr, 10);
     const bool useLocalNameservers = checkAndClearUseLocalNameserversFlag(&netId);
@@ -641,6 +1123,51 @@ DnsProxyListener::GetHostByAddrHandler::~GetHostByAddrHandler() {
     free(mAddress);
 }
 
+void DnsProxyListener::GetHostByAddrHandler::doDns64ReverseLookup(struct hostent** hpp) {
+    if (*hpp != nullptr || mAddressFamily != AF_INET6 || !mAddress) {
+        return;
+    }
+
+    netdutils::IPPrefix prefix{};
+    if (net::gCtls->resolverCtrl.getPrefix64(mNetContext.dns_netid, &prefix)) {
+        return;
+    }
+
+    if (!isValidNat64Prefix(prefix)) {
+        return;
+    }
+
+    struct sockaddr_storage ss = netdutils::IPSockAddr(prefix.ip());
+    struct sockaddr_in6* v6prefix = (struct sockaddr_in6*) &ss;
+    struct in6_addr v6addr = *(in6_addr*) mAddress;
+    // Check if address has NAT64 prefix. Only /96 IPv6 NAT64 prefixes are supported
+    if ((v6addr.s6_addr32[0] != v6prefix->sin6_addr.s6_addr32[0]) ||
+        (v6addr.s6_addr32[1] != v6prefix->sin6_addr.s6_addr32[1]) ||
+        (v6addr.s6_addr32[2] != v6prefix->sin6_addr.s6_addr32[2])) {
+        return;
+    }
+
+    const uid_t uid = mClient->getUid();
+    if (queryLimiter.start(uid)) {
+        // Remove NAT64 prefix and do reverse DNS query
+        struct in_addr v4addr = {.s_addr = v6addr.s6_addr32[3]};
+        *hpp = RESOLV_STUB.android_gethostbyaddrfornetcontext(&v4addr, sizeof(v4addr), AF_INET,
+                                                              &mNetContext);
+        queryLimiter.finish(uid);
+        if (*hpp) {
+            // Replace IPv4 address with original queried IPv6 address in place. The space has
+            // reserved by _dns_gethtbyaddr() and netbsd_gethostent_r() in
+            // system/netd/resolv/gethnamaddr.cpp.
+            // Note that android_gethostbyaddrfornetcontext returns only one entry in result.
+            memcpy((*hpp)->h_addr_list[0], &v6addr, sizeof(v6addr));
+            (*hpp)->h_addrtype = AF_INET6;
+            (*hpp)->h_length = sizeof(struct in6_addr);
+        }
+    } else {
+        ALOGE("gethostbyaddr: from UID %d, max concurrent queries reached", uid);
+    }
+}
+
 void DnsProxyListener::GetHostByAddrHandler::run() {
     if (DBG) {
         ALOGD("DnsProxyListener::GetHostByAddrHandler::run");
@@ -650,12 +1177,14 @@ void DnsProxyListener::GetHostByAddrHandler::run() {
     const uid_t uid = mClient->getUid();
     struct hostent* hp = nullptr;
     if (queryLimiter.start(uid)) {
-        hp = android_gethostbyaddrfornetcontext(
-                mAddress, mAddressLen, mAddressFamily, &mNetContext);
+        hp = RESOLV_STUB.android_gethostbyaddrfornetcontext(mAddress, mAddressLen, mAddressFamily,
+                                                            &mNetContext);
         queryLimiter.finish(uid);
     } else {
         ALOGE("gethostbyaddr: from UID %d, max concurrent queries reached", uid);
     }
+
+    doDns64ReverseLookup(&hp);
 
     if (DBG) {
         ALOGD("GetHostByAddrHandler::run gethostbyaddr errno: %s hp->h_name = %s, name_len = %zu",

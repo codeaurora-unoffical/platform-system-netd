@@ -10,7 +10,6 @@ cc_library_static {
         "libbinder",
         "liblog",
         "libnetd_client",
-        "libnetdaidl",
         "libnetdutils",
         "libssl",
         "netd_aidl_interface-cpp",
@@ -23,15 +22,12 @@ cc_library_static {
         ],
     },
     include_dirs: [
-        "system/netd/include",
-        "system/netd/resolv",
         "system/netd/server",
-        "system/netd/server/binder",
-        "system/netd/tests/dns_responder",
     ],
     srcs: [
         "dns_responder.cpp",
         "dns_responder_client.cpp",
         "dns_tls_frontend.cpp",
     ],
+    export_include_dirs: ["."],
 }

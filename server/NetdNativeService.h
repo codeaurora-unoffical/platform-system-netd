@@ -60,7 +60,7 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
 
     // Network and routing commands.
     binder::Status networkCreatePhysical(int32_t netId, int32_t permission) override;
-    binder::Status networkCreateVpn(int32_t netId, bool hasDns, bool secure) override;
+    binder::Status networkCreateVpn(int32_t netId, bool secure) override;
     binder::Status networkDestroy(int32_t netId) override;
 
     binder::Status networkAddInterface(int32_t netId, const std::string& iface) override;
@@ -107,8 +107,9 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
             const std::vector<std::string>& tlsServers,
             const std::vector<std::string>& tlsFingerprints) override;
     binder::Status getResolverInfo(int32_t netId, std::vector<std::string>* servers,
-            std::vector<std::string>* domains, std::vector<int32_t>* params,
-            std::vector<int32_t>* stats) override;
+                                   std::vector<std::string>* tlsServers,
+                                   std::vector<std::string>* domains, std::vector<int32_t>* params,
+                                   std::vector<int32_t>* stats) override;
 
     binder::Status setIPv6AddrGenMode(const std::string& ifName, int32_t mode) override;
 
@@ -156,7 +157,7 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
     binder::Status getMetricsReportingLevel(int *reportingLevel) override;
     binder::Status setMetricsReportingLevel(const int reportingLevel) override;
 
-    binder::Status ipSecSetEncapSocketOwner(const android::base::unique_fd& socket, int newUid);
+    binder::Status ipSecSetEncapSocketOwner(const os::ParcelFileDescriptor& socket, int newUid);
 
     binder::Status ipSecAllocateSpi(
             int32_t transformId,
@@ -166,77 +167,57 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
             int32_t* outSpi);
 
     binder::Status ipSecAddSecurityAssociation(
-            int32_t transformId,
-            int32_t mode,
-            const std::string& sourceAddress,
-            const std::string& destinationAddress,
-            int32_t underlyingNetId,
-            int32_t spi,
-            int32_t markValue,
-            int32_t markMask,
-            const std::string& authAlgo,
-            const std::vector<uint8_t>& authKey,
-            int32_t authTruncBits,
-            const std::string& cryptAlgo,
-            const std::vector<uint8_t>& cryptKey,
-            int32_t cryptTruncBits,
-            const std::string& aeadAlgo,
-            const std::vector<uint8_t>& aeadKey,
-            int32_t aeadIcvBits,
-            int32_t encapType,
-            int32_t encapLocalPort,
-            int32_t encapRemotePort);
+            int32_t transformId, int32_t mode, const std::string& sourceAddress,
+            const std::string& destinationAddress, int32_t underlyingNetId, int32_t spi,
+            int32_t markValue, int32_t markMask, const std::string& authAlgo,
+            const std::vector<uint8_t>& authKey, int32_t authTruncBits,
+            const std::string& cryptAlgo, const std::vector<uint8_t>& cryptKey,
+            int32_t cryptTruncBits, const std::string& aeadAlgo,
+            const std::vector<uint8_t>& aeadKey, int32_t aeadIcvBits, int32_t encapType,
+            int32_t encapLocalPort, int32_t encapRemotePort, int32_t interfaceId);
 
-    binder::Status ipSecDeleteSecurityAssociation(
-            int32_t transformId,
-            const std::string& sourceAddress,
-            const std::string& destinationAddress,
-            int32_t spi,
-            int32_t markValue,
-            int32_t markMask);
+    binder::Status ipSecDeleteSecurityAssociation(int32_t transformId,
+                                                  const std::string& sourceAddress,
+                                                  const std::string& destinationAddress,
+                                                  int32_t spi, int32_t markValue, int32_t markMask,
+                                                  int32_t interfaceId);
 
-    binder::Status ipSecApplyTransportModeTransform(
-            const android::base::unique_fd& socket,
-            int32_t transformId,
-            int32_t direction,
-            const std::string& sourceAddress,
-            const std::string& destinationAddress,
-            int32_t spi);
+    binder::Status ipSecApplyTransportModeTransform(const os::ParcelFileDescriptor& socket,
+                                                    int32_t transformId, int32_t direction,
+                                                    const std::string& sourceAddress,
+                                                    const std::string& destinationAddress,
+                                                    int32_t spi);
 
-    binder::Status ipSecRemoveTransportModeTransform(
-            const android::base::unique_fd& socket);
+    binder::Status ipSecRemoveTransportModeTransform(const os::ParcelFileDescriptor& socket);
 
     binder::Status ipSecAddSecurityPolicy(int32_t transformId, int32_t selAddrFamily,
                                           int32_t direction, const std::string& tmplSrcAddress,
                                           const std::string& tmplDstAddress, int32_t spi,
-                                          int32_t markValue, int32_t markMask);
+                                          int32_t markValue, int32_t markMask, int32_t interfaceId);
 
     binder::Status ipSecUpdateSecurityPolicy(int32_t transformId, int32_t selAddrFamily,
                                              int32_t direction, const std::string& tmplSrcAddress,
                                              const std::string& tmplDstAddress, int32_t spi,
-                                             int32_t markValue, int32_t markMask);
+                                             int32_t markValue, int32_t markMask,
+                                             int32_t interfaceId);
 
     binder::Status ipSecDeleteSecurityPolicy(int32_t transformId, int32_t selAddrFamily,
-                                             int32_t direction, int32_t markValue,
-                                             int32_t markMask);
+                                             int32_t direction, int32_t markValue, int32_t markMask,
+                                             int32_t interfaceId);
 
     binder::Status trafficCheckBpfStatsEnable(bool* ret) override;
 
-    binder::Status addVirtualTunnelInterface(
-            const std::string& deviceName,
-            const std::string& localAddress,
-            const std::string& remoteAddress,
-            int32_t iKey,
-            int32_t oKey);
+    binder::Status ipSecAddTunnelInterface(const std::string& deviceName,
+                                           const std::string& localAddress,
+                                           const std::string& remoteAddress, int32_t iKey,
+                                           int32_t oKey, int32_t interfaceId);
 
-    binder::Status updateVirtualTunnelInterface(
-            const std::string& deviceName,
-            const std::string& localAddress,
-            const std::string& remoteAddress,
-            int32_t iKey,
-            int32_t oKey);
+    binder::Status ipSecUpdateTunnelInterface(const std::string& deviceName,
+                                              const std::string& localAddress,
+                                              const std::string& remoteAddress, int32_t iKey,
+                                              int32_t oKey, int32_t interfaceId);
 
-    binder::Status removeVirtualTunnelInterface(const std::string& deviceName);
+    binder::Status ipSecRemoveTunnelInterface(const std::string& deviceName);
 
     // Idletimer-related commands
     binder::Status idletimerAddInterface(const std::string& ifName, int32_t timeout,
@@ -259,6 +240,18 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
                                             const std::string& toIface) override;
     binder::Status ipfwdRemoveInterfaceForward(const std::string& fromIface,
                                                const std::string& toIface) override;
+    // Tether-forward-related commands
+    binder::Status tetherAddForward(const std::string& intIface,
+                                    const std::string& extIface) override;
+    binder::Status tetherRemoveForward(const std::string& intIface,
+                                       const std::string& extIface) override;
+
+    // tcp_mem-config command
+    binder::Status setTcpRWmemorySize(const std::string& rmemValues,
+                                      const std::string& wmemValues) override;
+
+    // DNS64-related commands (internal use only)
+    binder::Status getPrefix64(int netId, std::string* _aidl_return);
 
   private:
     std::vector<uid_t> intsToUids(const std::vector<int32_t>& intUids);

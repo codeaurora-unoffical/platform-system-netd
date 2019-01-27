@@ -48,6 +48,7 @@
 #include "ResolverStats.h"
 #include "netd_resolv/params.h"
 #include "netd_resolv/resolv.h"
+#include "netd_resolv/resolv_stub.h"
 #include "netd_resolv/stats.h"
 
 namespace android {
@@ -121,26 +122,17 @@ int ResolverController::setDnsServers(unsigned netId, const char* searchDomains,
     if (DBG) {
         ALOGD("setDnsServers netId = %u, numservers = %d", netId, numservers);
     }
-    return -resolv_set_nameservers_for_net(netId, servers, numservers, searchDomains, params);
+    return -RESOLV_STUB.resolv_set_nameservers_for_net(netId, servers, numservers, searchDomains,
+                                                       params);
 }
 
 int ResolverController::clearDnsServers(unsigned netId) {
-    resolv_set_nameservers_for_net(netId, nullptr, 0, "", nullptr);
+    RESOLV_STUB.resolv_set_nameservers_for_net(netId, nullptr, 0, "", nullptr);
     if (DBG) {
         ALOGD("clearDnsServers netId = %u\n", netId);
     }
     mDns64Configuration.stopPrefixDiscovery(netId);
-    resolv_delete_private_dns_for_net(netId);
-    return 0;
-}
-
-int ResolverController::flushDnsCache(unsigned netId) {
-    if (DBG) {
-        ALOGD("flushDnsCache netId = %u\n", netId);
-    }
-
-    resolv_flush_cache_for_net(netId);
-
+    RESOLV_STUB.resolv_delete_private_dns_for_net(netId);
     return 0;
 }
 
@@ -167,8 +159,8 @@ int ResolverController::getDnsInfo(unsigned netId, std::vector<std::string>* ser
     domains->clear();
     *params = __res_params{};
     stats->clear();
-    int revision_id = android_net_res_stats_get_info_for_net(netId, &nscount, res_servers, &dcount,
-            res_domains, params, res_stats);
+    int revision_id = RESOLV_STUB.android_net_res_stats_get_info_for_net(
+            netId, &nscount, res_servers, &dcount, res_domains, params, res_stats);
 
     // If the netId is unknown (which can happen for valid net IDs for which no DNS servers have
     // yet been configured), there is no revision ID. In this case there is no data to return.
@@ -185,7 +177,7 @@ int ResolverController::getDnsInfo(unsigned netId, std::vector<std::string>* ser
     // Determine which servers are considered usable by the resolver.
     bool valid_servers[MAXNS];
     std::fill_n(valid_servers, MAXNS, false);
-    android_net_res_stats_get_usable_servers(params, res_stats, nscount, valid_servers);
+    RESOLV_STUB.android_net_res_stats_get_usable_servers(params, res_stats, nscount, valid_servers);
 
     // Convert the server sockaddr structures to std::string.
     stats->resize(nscount);
@@ -202,9 +194,9 @@ int ResolverController::getDnsInfo(unsigned netId, std::vector<std::string>* ser
         }
         servers->push_back(std::move(server_str));
         android::net::ResolverStats& cur_stats = (*stats)[i];
-        android_net_res_stats_aggregate(&res_stats[i], &cur_stats.successes, &cur_stats.errors,
-                &cur_stats.timeouts, &cur_stats.internal_errors, &cur_stats.rtt_avg,
-                &cur_stats.last_sample_time);
+        RESOLV_STUB.android_net_res_stats_aggregate(
+                &res_stats[i], &cur_stats.successes, &cur_stats.errors, &cur_stats.timeouts,
+                &cur_stats.internal_errors, &cur_stats.rtt_avg, &cur_stats.last_sample_time);
         cur_stats.usable = valid_servers[i];
     }
 
@@ -251,13 +243,13 @@ int ResolverController::setResolverConfiguration(int32_t netId,
     fwmark.protectedFromVpn = true;
     fwmark.permission = PERMISSION_SYSTEM;
 
-    const int err = resolv_set_private_dns_for_net(
+    const int err = RESOLV_STUB.resolv_set_private_dns_for_net(
             netId, fwmark.intValue, server_ptrs.data(), server_ptrs.size(), tlsName.c_str(),
             fingerprint_ptrs.data(), fingerprint_ptrs.size());
     if (err != 0) {
         return err;
     }
-    resolv_register_private_dns_callback(&onPrivateDnsValidation);
+    RESOLV_STUB.resolv_register_private_dns_callback(&onPrivateDnsValidation);
 
     // Convert network-assigned server list to bionic's format.
     server_ptrs.clear();
@@ -270,7 +262,8 @@ int ResolverController::setResolverConfiguration(int32_t netId,
     std::string domains_str;
     if (!domains.empty()) {
         domains_str = domains[0];
-        for (size_t i = 1 ; i < domains.size() ; ++i) {
+        count = std::min<size_t>(MAXDNSRCH, domains.size());
+        for (size_t i = 1; i < count; ++i) {
             domains_str += " " + domains[i];
         }
     }
@@ -311,8 +304,9 @@ int ResolverController::setResolverConfiguration(int32_t netId,
 }
 
 int ResolverController::getResolverInfo(int32_t netId, std::vector<std::string>* servers,
-        std::vector<std::string>* domains, std::vector<int32_t>* params,
-        std::vector<int32_t>* stats) {
+                                        std::vector<std::string>* domains,
+                                        std::vector<std::string>* tlsServers,
+                                        std::vector<int32_t>* params, std::vector<int32_t>* stats) {
     using android::net::ResolverStats;
     using android::net::INetd;
     __res_params res_params;
@@ -325,6 +319,13 @@ int ResolverController::getResolverInfo(int32_t netId, std::vector<std::string>*
     // Serialize the information for binder.
     ResolverStats::encodeAll(res_stats, stats);
 
+    ExternalPrivateDnsStatus privateDnsStatus = {PrivateDnsMode::OFF, 0, {}};
+    RESOLV_STUB.resolv_get_private_dns_status_for_net(netId, &privateDnsStatus);
+    for (unsigned i = 0; i < privateDnsStatus.numServers; i++) {
+        std::string tlsServer_str = addrToString(&(privateDnsStatus.serverStatus[i].ss));
+        tlsServers->push_back(std::move(tlsServer_str));
+    }
+
     params->resize(INetd::RESOLVER_PARAMS_COUNT);
     (*params)[INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY] = res_params.sample_validity;
     (*params)[INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD] = res_params.success_threshold;
@@ -332,6 +333,27 @@ int ResolverController::getResolverInfo(int32_t netId, std::vector<std::string>*
     (*params)[INetd::RESOLVER_PARAMS_MAX_SAMPLES] = res_params.max_samples;
     (*params)[INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC] = res_params.base_timeout_msec;
     return 0;
+}
+
+// TODO: use StatusOr<T> to wrap the result.
+int ResolverController::getPrefix64(unsigned netId, netdutils::IPPrefix* prefix) {
+    netdutils::IPPrefix p = mDns64Configuration.getPrefix64(netId);
+    if (p.family() != AF_INET6 || p.length() == 0) {
+        ALOGE("No valid NAT64 prefix (%d,%s)\n", netId, p.toString().c_str());
+        return -ENOENT;
+    }
+    *prefix = p;
+    return 0;
+}
+
+void ResolverController::sendNat64PrefixEvent(const Dns64Configuration::Nat64PrefixInfo& args) {
+    const auto netdEventListener = net::gCtls->eventReporter.getNetdEventListener();
+    if (netdEventListener == nullptr) {
+        gLog.error("getNetdEventListener() returned nullptr. dropping NAT64 prefix event");
+        return;
+    }
+    netdEventListener->onNat64PrefixEvent(args.netId, args.added, args.prefixString,
+                                          args.prefixLength);
 }
 
 void ResolverController::dump(DumpWriter& dw, unsigned netId) {
@@ -388,7 +410,7 @@ void ResolverController::dump(DumpWriter& dw, unsigned netId) {
 
         mDns64Configuration.dump(dw, netId);
         ExternalPrivateDnsStatus privateDnsStatus = {PrivateDnsMode::OFF, 0, {}};
-        resolv_get_private_dns_status_for_net(netId, &privateDnsStatus);
+        RESOLV_STUB.resolv_get_private_dns_status_for_net(netId, &privateDnsStatus);
         dw.println("Private DNS mode: %s",
                    getPrivateDnsModeString(static_cast<PrivateDnsMode>(privateDnsStatus.mode)));
         if (!privateDnsStatus.numServers) {
@@ -396,7 +418,7 @@ void ResolverController::dump(DumpWriter& dw, unsigned netId) {
         } else {
             dw.println("Private DNS configuration (%u entries)", privateDnsStatus.numServers);
             dw.incIndent();
-            for (int i = 0; i < privateDnsStatus.numServers; i++) {
+            for (unsigned i = 0; i < privateDnsStatus.numServers; i++) {
                 dw.println("%s name{%s} status{%s}",
                            addrToString(&(privateDnsStatus.serverStatus[i].ss)).c_str(),
                            privateDnsStatus.serverStatus[i].hostname,

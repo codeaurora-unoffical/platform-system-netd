@@ -38,8 +38,6 @@
 #include "bpf/BpfUtils.h"
 #include "netdbpf/BpfNetworkStats.h"
 
-using namespace android::bpf;
-
 using ::testing::_;
 using ::testing::ByMove;
 using ::testing::Invoke;
@@ -85,6 +83,8 @@ class BpfNetworkStatsHelperTest : public testing::Test {
     BpfMap<uint32_t, StatsValue> mFakeIfaceStatsMap;
 
     void SetUp() {
+        SKIP_IF_BPF_NOT_SUPPORTED;
+
         mFakeCookieTagMap = BpfMap<uint64_t, UidTag>(createMap(
             BPF_MAP_TYPE_HASH, sizeof(uint64_t), sizeof(struct UidTag), TEST_MAP_SIZE, 0));
         ASSERT_LE(0, mFakeCookieTagMap.getMap());
@@ -538,6 +538,8 @@ TEST_F(BpfNetworkStatsHelperTest, TestGetStatsSortedAndGrouped) {
 // Test to verify that subtract overflow will not be triggered by the compare function invoked from
 // sorting. See http:/b/119193941.
 TEST_F(BpfNetworkStatsHelperTest, TestGetStatsSortAndOverflow) {
+    SKIP_IF_BPF_NOT_SUPPORTED;
+
     updateIfaceMap(IFACE_NAME1, IFACE_INDEX1);
 
     StatsValue value1 = {

@@ -32,6 +32,7 @@
 #include <vector>
 
 #define LOG_TAG "DNSResponder"
+#include <android-base/strings.h>
 #include <log/log.h>
 #include <netdutils/SocketOption.h>
 
@@ -47,6 +48,12 @@ std::string errno2str() {
 }
 
 #define APLOGI(fmt, ...) ALOGI(fmt ": [%d] %s", __VA_ARGS__, errno, errno2str().c_str())
+
+#if 0
+#define DBGLOG(fmt, ...) ALOGI(fmt, __VA_ARGS__)
+#else
+#define DBGLOG(fmt, ...)
+#endif
 
 std::string str2hex(const char* buffer, size_t len) {
     std::string str(len*2, '\0');
@@ -140,7 +147,6 @@ const char* dnsclass2str(unsigned dnsclass) {
     static const char* kUnknownStr{ "UNKNOWN" };
     if (it == kClassStrs.end()) return kUnknownStr;
     return it->second;
-    return "unknown";
 }
 
 struct DNSName {
@@ -564,6 +570,10 @@ void DNSResponder::setResponseProbability(double response_probability) {
     response_probability_ = response_probability;
 }
 
+void DNSResponder::setEdns(Edns edns) {
+    edns_ = edns;
+}
+
 bool DNSResponder::running() const {
     return socket_ != -1;
 }
@@ -707,7 +717,8 @@ void DNSResponder::requestHandler() {
             ALOGI("recvfrom() failed");
             continue;
         }
-        ALOGI("read %zd bytes", len);
+        DBGLOG("read %zd bytes", len);
+        std::lock_guard lock(cv_mutex_);
         char response[4096];
         size_t response_len = sizeof(response);
         if (handleDNSRequest(buffer, len, response, &response_len) &&
@@ -717,7 +728,7 @@ void DNSResponder::requestHandler() {
             std::string host_str =
                 addr2str(reinterpret_cast<const sockaddr*>(&sa), sa_len);
             if (len > 0) {
-                ALOGI("sent %zu bytes to %s", len, host_str.c_str());
+                DBGLOG("sent %zu bytes to %s", len, host_str.c_str());
             } else {
                 APLOGI("sendto() failed for %s", host_str.c_str());
             }
@@ -730,13 +741,14 @@ void DNSResponder::requestHandler() {
         } else {
             ALOGI("not responding");
         }
+        cv.notify_one();
     }
 }
 
 bool DNSResponder::handleDNSRequest(const char* buffer, ssize_t len,
                                     char* response, size_t* response_len)
                                     const {
-    ALOGI("request: '%s'", str2hex(buffer, len).c_str());
+    DBGLOG("request: '%s'", str2hex(buffer, len).c_str());
     const char* buffer_end = buffer + len;
     DNSHeader header;
     const char* cur = header.read(buffer, buffer_end);
@@ -764,11 +776,15 @@ bool DNSResponder::handleDNSRequest(const char* buffer, ssize_t len,
         return makeErrorResponse(&header, ns_rcode::ns_r_formerr, response,
                                  response_len);
     }
-    if (!header.additionals.empty() && fail_on_edns_) {
+    if (!header.additionals.empty() && edns_ != Edns::ON) {
         ALOGI("DNS request has an additional section (assumed EDNS). "
-              "Simulating an ancient (pre-EDNS) server.");
-        return makeErrorResponse(&header, ns_rcode::ns_r_formerr, response,
-                                 response_len);
+              "Simulating an ancient (pre-EDNS) server, and returning %s",
+              edns_ == Edns::FORMERR ? "RCODE FORMERR." : "no response.");
+        if (edns_ == Edns::FORMERR) {
+            return makeErrorResponse(&header, ns_rcode::ns_r_formerr, response, response_len);
+        }
+        // No response.
+        return false;
     }
     {
         std::lock_guard lock(queries_mutex_);
@@ -783,7 +799,7 @@ bool DNSResponder::handleDNSRequest(const char* buffer, ssize_t len,
     if (arc4random_uniform(bound) > bound * response_probability_) {
         if (error_rcode_ < 0) {
             ALOGI("Returning no response");
-            return true;
+            return false;
         } else {
             ALOGI("returning RCODE %d in accordance with probability distribution",
                   static_cast<int>(error_rcode_));
@@ -822,8 +838,8 @@ bool DNSResponder::addAnswerRecords(const DNSQuestion& question,
             question.qname.name.c_str(), dnstype2str(question.qtype));
         return true;
     }
-    ALOGI("mapping found for %s %s: %s", question.qname.name.c_str(),
-        dnstype2str(question.qtype), it->second.c_str());
+    DBGLOG("mapping found for %s %s: %s", question.qname.name.c_str(), dnstype2str(question.qtype),
+           it->second.c_str());
     DNSRecord record;
     record.name = question.qname;
     record.rtype = question.qtype;
@@ -841,6 +857,37 @@ bool DNSResponder::addAnswerRecords(const DNSQuestion& question,
             ALOGI("inet_pton(AF_INET6, %s) failed", it->second.c_str());
             return false;
         }
+    } else if (question.qtype == ns_type::ns_t_ptr) {
+        constexpr char delimiter = '.';
+        std::string name = it->second;
+        std::vector<char> rdata;
+
+        // PTRDNAME field
+        // The "name" should be an absolute domain name which ends in a dot.
+        if (name.back() != delimiter) {
+            ALOGI("invalid absolute domain name");
+            return false;
+        }
+        name.pop_back();  // remove the dot in tail
+
+        for (const std::string& label : android::base::Split(name, {delimiter})) {
+            // The length of label is limited to 63 octets or less. See RFC 1035 section 3.1.
+            if (label.length() == 0 || label.length() > 63) {
+                ALOGI("invalid label length");
+                return false;
+            }
+
+            rdata.push_back(label.length());
+            rdata.insert(rdata.end(), label.begin(), label.end());
+        }
+        rdata.push_back(0);  // Length byte of zero terminates the label list
+
+        // The length of domain name is limited to 255 octets or less. See RFC 1035 section 3.1.
+        if (rdata.size() > 255) {
+            ALOGI("invalid name length");
+            return false;
+        }
+        record.rdata = move(rdata);
     } else {
         ALOGI("unhandled qtype %s", dnstype2str(question.qtype));
         return false;

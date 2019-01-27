@@ -27,6 +27,7 @@
 #include <arpa/inet.h>
 
 #include <netd_resolv/resolv.h>
+#include <netd_resolv/resolv_stub.h>
 
 #include "DumpWriter.h"
 #include "NetworkController.h"
@@ -47,7 +48,11 @@ const char Dns64Configuration::kIPv4Literal2[] = "192.0.0.171";
 void Dns64Configuration::startPrefixDiscovery(unsigned netId) {
     std::lock_guard guard(mMutex);
 
-    mDns64Configs.erase(netId);
+    // TODO: Keep previous prefix for a while
+    // Currently, we remove current prefix, if any, before starting a prefix discovery.
+    // This causes that Netd and framework temporarily forgets DNS64 prefix even the prefix may be
+    // discovered in a short time.
+    removeDns64Config(netId);
 
     Dns64Config cfg(getNextId(), netId);
     // Emplace a copy of |cfg| in the map.
@@ -69,6 +74,9 @@ void Dns64Configuration::startPrefixDiscovery(unsigned netId) {
 
             android_net_context netcontext{};
             mNetCtrl.getNetworkContext(evalCfg.netId, 0, &netcontext);
+            // Prefix discovery must bypass private DNS because in strict mode
+            // the server generally won't know the NAT64 prefix.
+            netcontext.flags |= NET_CONTEXT_FLAG_USE_LOCAL_NAMESERVERS;
             if (doRfc7050PrefixDiscovery(netcontext, &evalCfg)) {
                 this->recordDns64Config(evalCfg);
                 break;
@@ -91,17 +99,20 @@ void Dns64Configuration::startPrefixDiscovery(unsigned netId) {
 
 void Dns64Configuration::stopPrefixDiscovery(unsigned netId) {
     std::lock_guard guard(mMutex);
-    mDns64Configs.erase(netId);
+    removeDns64Config(netId);
     mCv.notify_all();
 }
 
-IPPrefix Dns64Configuration::getPrefix64(unsigned netId) const {
-    std::lock_guard guard(mMutex);
-
+IPPrefix Dns64Configuration::getPrefix64Locked(unsigned netId) const REQUIRES(mMutex) {
     const auto& iter = mDns64Configs.find(netId);
     if (iter != mDns64Configs.end()) return iter->second.prefix64;
 
     return IPPrefix{};
+}
+
+IPPrefix Dns64Configuration::getPrefix64(unsigned netId) const {
+    std::lock_guard guard(mMutex);
+    return getPrefix64Locked(netId);
 }
 
 void Dns64Configuration::dump(DumpWriter& dw, unsigned netId) {
@@ -137,12 +148,10 @@ bool Dns64Configuration::doRfc7050PrefixDiscovery(const android_net_context& net
     // TODO: Refactor so that netd can get all the regular getaddrinfo handling
     // that regular apps get. We bypass the UNIX socket connection back to
     // ourselves, which means we also bypass all the special netcontext flag
-    // handling and the resolver event logging. Note that we because we bypass
-    // this special handling we also implicitly bypass DNS-over-TLS, which we
-    // need to do here anyway.
+    // handling and the resolver event logging.
     struct addrinfo* res = nullptr;
-    const int status =
-            android_getaddrinfofornetcontext(kIPv4OnlyHost, nullptr, &hints, &netcontext, &res);
+    const int status = RESOLV_STUB.android_getaddrinfofornetcontext(kIPv4OnlyHost, nullptr, &hints,
+                                                                    &netcontext, &res);
     ScopedAddrinfo result(res);
     if (status != 0) {
         ALOGW("(%u, %u) plat_prefix/dns(%s) status = %d/%s",
@@ -181,17 +190,38 @@ bool Dns64Configuration::isDiscoveryInProgress(const Dns64Config& cfg) const REQ
     return (currentCfg.discoveryId == cfg.discoveryId);
 }
 
+bool Dns64Configuration::reportNat64PrefixStatus(unsigned netId, bool added, const IPPrefix& pfx) {
+    if (pfx.ip().family() != AF_INET6 || pfx.ip().scope_id() != 0) {
+        ALOGW("Abort to send NAT64 prefix notification. Unexpected NAT64 prefix (%u, %d, %s).",
+              netId, added, pfx.toString().c_str());
+        return false;
+    }
+    struct Nat64PrefixInfo args = {netId, added, pfx.ip().toString(), (uint8_t) pfx.length()};
+    mPrefixCallback(args);
+    return true;
+}
+
 bool Dns64Configuration::shouldContinueDiscovery(const Dns64Config& cfg) {
     std::lock_guard guard(mMutex);
     return isDiscoveryInProgress(cfg);
+}
+
+void Dns64Configuration::removeDns64Config(unsigned netId) REQUIRES(mMutex) {
+    IPPrefix prefix = getPrefix64Locked(netId);
+    mDns64Configs.erase(netId);
+    if (!prefix.isUninitialized()) {
+        reportNat64PrefixStatus(netId, PREFIX_REMOVED, prefix);
+    }
 }
 
 void Dns64Configuration::recordDns64Config(const Dns64Config& cfg) {
     std::lock_guard guard(mMutex);
     if (!isDiscoveryInProgress(cfg)) return;
 
-    mDns64Configs.erase(cfg.netId);
+    removeDns64Config(cfg.netId);
     mDns64Configs.emplace(std::make_pair(cfg.netId, cfg));
+
+    reportNat64PrefixStatus(cfg.netId, PREFIX_ADDED, cfg.prefix64);
 
     // TODO: consider extending INetdEventListener to report the DNS64 prefix
     // up to ConnectivityService to potentially include this in LinkProperties.
