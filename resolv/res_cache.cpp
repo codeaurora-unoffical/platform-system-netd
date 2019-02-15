@@ -49,7 +49,6 @@ constexpr bool kDumpData = false;
 
 #include <android-base/logging.h>
 
-#include "netd_resolv/resolv.h"
 #include "res_state_ext.h"
 #include "resolv_cache.h"
 #include "resolv_private.h"
@@ -1248,7 +1247,11 @@ static void _cache_notify_waiting_tid_locked(struct resolv_cache* cache, Entry* 
 }
 
 /* notify the cache that the query failed */
-void _resolv_cache_query_failed(unsigned netid, const void* query, int querylen) {
+void _resolv_cache_query_failed(unsigned netid, const void* query, int querylen, uint32_t flags) {
+    // We should not notify with these flags.
+    if (flags & (ANDROID_RESOLV_NO_CACHE_STORE | ANDROID_RESOLV_NO_CACHE_LOOKUP)) {
+        return;
+    }
     Entry key[1];
     Cache* cache;
 
@@ -1463,7 +1466,11 @@ static void _cache_remove_expired(Cache* cache) {
 }
 
 ResolvCacheStatus _resolv_cache_lookup(unsigned netid, const void* query, int querylen,
-                                       void* answer, int answersize, int* answerlen) {
+                                       void* answer, int answersize, int* answerlen,
+                                       uint32_t flags) {
+    if (flags & ANDROID_RESOLV_NO_CACHE_LOOKUP) {
+        return RESOLV_CACHE_SKIP;
+    }
     Entry key[1];
     Entry** lookup;
     Entry* e;
@@ -1498,6 +1505,11 @@ ResolvCacheStatus _resolv_cache_lookup(unsigned netid, const void* query, int qu
 
     if (e == NULL) {
         VLOG << "NOT IN CACHE";
+        // If it is no-cache-store mode, we won't wait for possible query.
+        if (flags & ANDROID_RESOLV_NO_CACHE_STORE) {
+            result = RESOLV_CACHE_SKIP;
+            goto Exit;
+        }
         // calling thread will wait if an outstanding request is found
         // that matching this query
         if (!_cache_check_pending_request_locked(&cache, key, netid) || cache == NULL) {
@@ -1729,7 +1741,7 @@ static void resolv_set_default_params(struct __res_params* params) {
     params->base_timeout_msec = 0;  // 0 = legacy algorithm
 }
 
-int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigned numservers,
+int resolv_set_nameservers_for_net(unsigned netid, const char** servers, const int numservers,
                                    const char* domains, const __res_params* params) {
     char* cp;
     int* offset;
@@ -1744,13 +1756,13 @@ int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigne
     // As a side effect this also reduces the time the lock is kept.
     char sbuf[NI_MAXSERV];
     snprintf(sbuf, sizeof(sbuf), "%u", NAMESERVER_PORT);
-    for (unsigned i = 0; i < numservers; i++) {
+    for (int i = 0; i < numservers; i++) {
         // The addrinfo structures allocated here are freed in free_nameservers_locked().
         const addrinfo hints = {
                 .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM, .ai_flags = AI_NUMERICHOST};
         int rt = getaddrinfo_numeric(servers[i], sbuf, hints, &nsaddrinfo[i]);
         if (rt != 0) {
-            for (unsigned j = 0; j < i; j++) {
+            for (int j = 0; j < i; j++) {
                 freeaddrinfo(nsaddrinfo[j]);
             }
             VLOG << __func__ << ": getaddrinfo_numeric(" << servers[i]
@@ -1778,8 +1790,7 @@ int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigne
         if (!resolv_is_nameservers_equal_locked(cache_info, servers, numservers)) {
             // free current before adding new
             free_nameservers_locked(cache_info);
-            unsigned i;
-            for (i = 0; i < numservers; i++) {
+            for (int i = 0; i < numservers; i++) {
                 cache_info->nsaddrinfo[i] = nsaddrinfo[i];
                 cache_info->nameservers[i] = strdup(servers[i]);
                 VLOG << __func__ << ": netid = " << netid << ", addr = " << servers[i];
@@ -1804,7 +1815,7 @@ int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigne
                 res_cache_clear_stats_locked(cache_info);
                 ++cache_info->revision_id;
             }
-            for (unsigned j = 0; j < numservers; j++) {
+            for (int j = 0; j < numservers; j++) {
                 freeaddrinfo(nsaddrinfo[j]);
             }
         }

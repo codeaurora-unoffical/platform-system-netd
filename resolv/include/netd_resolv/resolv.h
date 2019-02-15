@@ -32,6 +32,8 @@
  * This header contains declarations related to per-network DNS server selection.
  * They are used by system/netd/ and should not be exposed by the public NDK headers.
  */
+#include <android/multinetwork.h>  // ResNsendFlags
+
 #include <netinet/in.h>
 
 #include "params.h"
@@ -91,7 +93,7 @@ struct android_net_context {
 
 struct ExternalPrivateDnsStatus {
     PrivateDnsMode mode;
-    unsigned numServers;
+    int numServers;
     struct PrivateDnsInfo {
         sockaddr_storage ss;
         const char* hostname;
@@ -102,8 +104,8 @@ struct ExternalPrivateDnsStatus {
 typedef void (*private_dns_validated_callback)(unsigned netid, const char* server,
                                                const char* hostname, bool success);
 
-LIBNETD_RESOLV_PUBLIC hostent* android_gethostbyaddrfornetcontext(const void*, socklen_t, int,
-                                                                  const android_net_context*);
+LIBNETD_RESOLV_PUBLIC int android_gethostbyaddrfornetcontext(const void*, socklen_t, int,
+                                                             const android_net_context*, hostent**);
 LIBNETD_RESOLV_PUBLIC int android_gethostbynamefornetcontext(const char*, int,
                                                              const android_net_context*, hostent**);
 LIBNETD_RESOLV_PUBLIC int android_getaddrinfofornetcontext(const char*, const char*,
@@ -113,21 +115,20 @@ LIBNETD_RESOLV_PUBLIC int android_getaddrinfofornetcontext(const char*, const ch
 LIBNETD_RESOLV_PUBLIC bool resolv_has_nameservers(unsigned netid);
 
 // Query dns with raw msg
-// TODO: Add a way to control query parameter, like flags, or maybe res_options or even res_state.
-LIBNETD_RESOLV_PUBLIC int resolv_res_nsend(const android_net_context* netContext, const u_char* msg,
-                                           int msgLen, u_char* ans, int ansLen, int* rcode);
+LIBNETD_RESOLV_PUBLIC int resolv_res_nsend(const android_net_context* netContext,
+                                           const uint8_t* msg, int msgLen, uint8_t* ans, int ansLen,
+                                           int* rcode, uint32_t flags);
 
 // Set name servers for a network
 LIBNETD_RESOLV_PUBLIC int resolv_set_nameservers_for_net(unsigned netid, const char** servers,
-                                                         unsigned numservers, const char* domains,
+                                                         int numservers, const char* domains,
                                                          const __res_params* params);
 
 LIBNETD_RESOLV_PUBLIC int resolv_set_private_dns_for_net(unsigned netid, uint32_t mark,
-                                                         const char** servers,
-                                                         const unsigned numServers,
+                                                         const char** servers, int numServers,
                                                          const char* tlsName,
                                                          const uint8_t** fingerprints,
-                                                         const unsigned numFingerprints);
+                                                         int numFingerprints);
 
 LIBNETD_RESOLV_PUBLIC void resolv_delete_private_dns_for_net(unsigned netid);
 
