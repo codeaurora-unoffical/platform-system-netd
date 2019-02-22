@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 The Android Open Source Project
+ * Copyright (C) 2019 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,18 +14,14 @@
  * limitations under the License.
  */
 
-#ifndef NETD_CLIENT_NETID_H
-#define NETD_CLIENT_NETID_H
+#ifndef NETDUTILS_UID_CONSTANTS_H
+#define NETDUTILS_UID_CONSTANTS_H
 
-/*
- * Passing NETID_UNSET as the netId causes system/netd/resolv/DnsProxyListener.cpp to
- * fill in the appropriate default netId for the query.
- */
-#define NETID_UNSET 0u
+// These are used by both eBPF kernel programs and netd, we cannot put them in NetdConstant.h since
+// we have to minimize the number of headers included by the BPF kernel program.
+#define MIN_SYSTEM_UID 0
+#define MAX_SYSTEM_UID 9999
 
-/*
- * MARK_UNSET represents the default (i.e. unset) value for a socket mark.
- */
-#define MARK_UNSET 0u
+#define PER_USER_RANGE 100000
 
-#endif  // NETD_CLIENT_NETID_H
+#endif  // NETDUTILS_UID_CONSTANTS_H

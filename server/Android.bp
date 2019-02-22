@@ -29,6 +29,8 @@ aidl_interface {
     local_include_dir: "binder",
     srcs: [
         "binder/android/net/INetd.aidl",
+        // AIDL interface that callers can implement to receive networking events from netd.
+        "binder/android/net/INetdUnsolicitedEventListener.aidl",
         "binder/android/net/InterfaceConfigurationParcel.aidl",
         "binder/android/net/TetherStatsParcel.aidl",
         "binder/android/net/UidRangeParcel.aidl",
@@ -122,9 +124,9 @@ cc_binary {
         "libnetdutils",
         "libnetutils",
         "libpcap",
+        "libprocessgroup",
         "libqtaguid",
         "libselinux",
-        "libstatslog",
         "libsysutils",
         "libutils",
         "netd_aidl_interface-cpp",
@@ -139,7 +141,6 @@ cc_binary {
     srcs: [
         "ClatdController.cpp",
         "CommandListener.cpp",
-        "DnsProxyListener.cpp",
         "DummyNetwork.cpp",
         "DumpWriter.cpp",
         "EventReporter.cpp",
