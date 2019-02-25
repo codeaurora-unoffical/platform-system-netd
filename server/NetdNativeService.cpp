@@ -205,6 +205,19 @@ status_t NetdNativeService::dump(int fd, const Vector<String16> &args) {
         dw.blankline();
     }
 
+    {
+        ScopedIndent indentLog(dw);
+        if (contains(args, String16(OPT_SHORT))) {
+            dw.println("UnsolicitedLog: <omitted>");
+        } else {
+            dw.println("UnsolicitedLog:");
+            ScopedIndent indentLogEntries(dw);
+            gUnsolicitedLog.forEachEntry(
+                    [&dw](const std::string& entry) mutable { dw.println(entry); });
+        }
+        dw.blankline();
+    }
+
     return NO_ERROR;
 }
 
@@ -1351,6 +1364,15 @@ binder::Status NetdNativeService::networkCanProtect(int32_t uid, bool* ret) {
     return binder::Status::ok();
 }
 
+binder::Status NetdNativeService::trafficSetNetPermForUids(int32_t permission,
+                                                           const std::vector<int32_t>& uids) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(permission).arg(uids);
+    gCtls->trafficCtrl.setPermissionForUids(permission, intsToUids(uids));
+    gLog.log(entry.withAutomaticDuration());
+    return binder::Status::ok();
+}
+
 namespace {
 std::string ruleToString(int32_t rule) {
     switch (rule) {
@@ -1490,6 +1512,15 @@ binder::Status NetdNativeService::getPrefix64(int netId, std::string* _aidl_retu
                 -err, String8::format("ResolverController error: %s", strerror(-err)));
     }
     *_aidl_return = prefix.toString();
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::registerUnsolicitedEventListener(
+        const android::sp<android::net::INetdUnsolicitedEventListener>& listener) {
+    ENFORCE_PERMISSION(NETWORK_STACK);
+    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
+    gCtls->eventReporter.registerUnsolEventListener(listener);
+    gLog.log(entry.withAutomaticDuration());
     return binder::Status::ok();
 }
 

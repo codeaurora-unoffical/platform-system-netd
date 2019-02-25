@@ -17,10 +17,13 @@
  */
 
 #include <cerrno>
+#include <chrono>
 #include <cinttypes>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -40,15 +43,18 @@
 #include <android-base/macros.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <bpf/BpfMap.h>
 #include <bpf/BpfUtils.h>
 #include <cutils/multiuser.h>
 #include <gtest/gtest.h>
 #include <logwrap/logwrap.h>
+#include <netdbpf/bpf_shared.h>
 #include <netutils/ifc.h>
 
 #include "InterfaceController.h"
 #include "NetdConstants.h"
 #include "Stopwatch.h"
+#include "TestUnsolService.h"
 #include "XfrmController.h"
 #include "android/net/INetd.h"
 #include "binder/IServiceManager.h"
@@ -65,7 +71,6 @@
 #define NAT_TABLE "nat"
 
 namespace binder = android::binder;
-namespace netdutils = android::netdutils;
 
 using android::IBinder;
 using android::IServiceManager;
@@ -77,7 +82,6 @@ using android::base::ReadFileToString;
 using android::base::StartsWith;
 using android::base::StringPrintf;
 using android::base::Trim;
-using android::base::WriteStringToFile;
 using android::bpf::hasBpfSupport;
 using android::net::INetd;
 using android::net::InterfaceConfigurationParcel;
@@ -85,7 +89,6 @@ using android::net::InterfaceController;
 using android::net::TetherStatsParcel;
 using android::net::TunInterface;
 using android::net::UidRangeParcel;
-using android::net::XfrmController;
 using android::netdutils::sSyscalls;
 
 #define SKIP_IF_BPF_SUPPORTED        \
@@ -97,6 +100,12 @@ static const char* IP_RULE_V4 = "-4";
 static const char* IP_RULE_V6 = "-6";
 static const int TEST_NETID1 = 65501;
 static const int TEST_NETID2 = 65502;
+
+// Use maximum reserved appId for applications to avoid conflict with existing
+// uids.
+static const int TEST_UID1 = 99999;
+static const int TEST_UID2 = 99998;
+
 constexpr int BASE_UID = AID_USER_OFFSET * 5;
 
 static const std::string NO_SOCKET_ALLOW_RULE("! owner UID match 0-4294967294");
@@ -340,6 +349,9 @@ TEST_F(BinderTest, IpSecSetEncapSocketOwner) {
 // IPsec tests are not run in 32 bit mode; both 32-bit kernels and
 // mismatched ABIs (64-bit kernel with 32-bit userspace) are unsupported.
 #if INTPTR_MAX != INT32_MAX
+
+using android::net::XfrmController;
+
 static const int XFRM_DIRECTIONS[] = {static_cast<int>(android::net::XfrmDirection::IN),
                                       static_cast<int>(android::net::XfrmDirection::OUT)};
 static const int ADDRESS_FAMILIES[] = {AF_INET, AF_INET6};
@@ -347,7 +359,7 @@ static const int ADDRESS_FAMILIES[] = {AF_INET, AF_INET6};
 #define RETURN_FALSE_IF_NEQ(_expect_, _ret_) \
         do { if ((_expect_) != (_ret_)) return false; } while(false)
 bool BinderTest::allocateIpSecResources(bool expectOk, int32_t* spi) {
-    netdutils::Status status = XfrmController::ipSecAllocateSpi(0, "::", "::1", 123, spi);
+    android::netdutils::Status status = XfrmController::ipSecAllocateSpi(0, "::", "::1", 123, spi);
     SCOPED_TRACE(status);
     RETURN_FALSE_IF_NEQ(status.ok(), expectOk);
 
@@ -363,7 +375,7 @@ bool BinderTest::allocateIpSecResources(bool expectOk, int32_t* spi) {
 }
 
 TEST_F(BinderTest, XfrmDualSelectorTunnelModePoliciesV4) {
-    binder::Status status;
+    android::binder::Status status;
 
     // Repeat to ensure cleanup and recreation works correctly
     for (int i = 0; i < 2; i++) {
@@ -411,7 +423,7 @@ TEST_F(BinderTest, XfrmDualSelectorTunnelModePoliciesV6) {
 }
 
 TEST_F(BinderTest, XfrmControllerInit) {
-    netdutils::Status status;
+    android::netdutils::Status status;
     status = XfrmController::Init();
     SCOPED_TRACE(status);
 
@@ -442,7 +454,8 @@ TEST_F(BinderTest, XfrmControllerInit) {
     // Remove Virtual Tunnel Interface.
     ASSERT_TRUE(XfrmController::ipSecRemoveTunnelInterface("ipsec_test").ok());
 }
-#endif
+
+#endif  // INTPTR_MAX != INT32_MAX
 
 static int bandwidthDataSaverEnabled(const char *binary) {
     std::vector<std::string> lines = listIptablesRule(binary, "bw_data_saver");
@@ -2800,4 +2813,69 @@ TEST_F(BinderTest, TcpBufferSet) {
 
     updateAndCheckTcpBuffer(mNetd, testRmemValue, testWmemValue);
     updateAndCheckTcpBuffer(mNetd, rmemValue, wmemValue);
+}
+
+namespace {
+
+void checkUidsExist(std::vector<int32_t>& uids, bool exist) {
+    android::bpf::BpfMap<uint32_t, uint8_t> uidPermissionMap(
+            android::bpf::mapRetrieve(UID_PERMISSION_MAP_PATH, 0));
+    for (int32_t uid : uids) {
+        android::netdutils::StatusOr<uint8_t> permission = uidPermissionMap.readValue(uid);
+        if (exist) {
+            EXPECT_TRUE(isOk(permission));
+            EXPECT_EQ(ALLOW_SOCK_CREATE, permission.value());
+        } else {
+            EXPECT_FALSE(isOk(permission));
+            EXPECT_EQ(ENOENT, permission.status().code());
+        }
+    }
+}
+
+}  // namespace
+
+TEST_F(BinderTest, TestInternetPermission) {
+    SKIP_IF_BPF_NOT_SUPPORTED;
+
+    std::vector<int32_t> appUids = {TEST_UID1, TEST_UID2};
+
+    mNetd->trafficSetNetPermForUids(INetd::PERMISSION_INTERNET, appUids);
+    checkUidsExist(appUids, true);
+    mNetd->trafficSetNetPermForUids(INetd::NO_PERMISSIONS, appUids);
+    checkUidsExist(appUids, false);
+}
+
+TEST_F(BinderTest, UnsolEvents) {
+    auto testUnsolService = android::net::TestUnsolService::start();
+    std::string oldTunName = sTun.name();
+    std::string newTunName = "unsolTest";
+    testUnsolService->tarVec.push_back(oldTunName);
+    testUnsolService->tarVec.push_back(newTunName);
+    auto& cv = testUnsolService->getCv();
+    auto& cvMutex = testUnsolService->getCvMutex();
+    binder::Status status = mNetd->registerUnsolicitedEventListener(
+            android::interface_cast<android::net::INetdUnsolicitedEventListener>(testUnsolService));
+    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+
+    // TODO: Add test for below events
+    //       StrictCleartextDetected / InterfaceDnsServersAdded
+    //       InterfaceClassActivity / QuotaLimitReached / InterfaceAddressRemoved
+
+    {
+        std::unique_lock lock(cvMutex);
+
+        // Re-init test Tun, and we expect that we will get some unsol events.
+        // Use the test Tun device name to verify if we receive its unsol events.
+        sTun.destroy();
+        // Use predefined name
+        sTun.init(newTunName);
+
+        EXPECT_EQ(std::cv_status::no_timeout, cv.wait_for(lock, std::chrono::seconds(2)));
+    }
+
+    // bit mask 1101101000
+    // Test only covers below events currently
+    const uint32_t kExpectedEvents = InterfaceAddressUpdated | InterfaceAdded | InterfaceRemoved |
+                                     InterfaceLinkStatusChanged | RouteChanged;
+    EXPECT_EQ(kExpectedEvents, testUnsolService->getReceived());
 }

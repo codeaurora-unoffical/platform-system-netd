@@ -35,7 +35,6 @@
 namespace android {
 namespace net {
 
-using android::base::Join;
 using android::base::StringPrintf;
 using android::base::StringAppendF;
 
@@ -43,6 +42,7 @@ auto Controllers::execIptablesRestore  = ::execIptablesRestore;
 auto Controllers::execIptablesRestoreWithOutput = ::execIptablesRestoreWithOutput;
 
 netdutils::Log gLog("netd");
+netdutils::Log gUnsolicitedLog("netdUnsolicited");
 
 namespace {
 
