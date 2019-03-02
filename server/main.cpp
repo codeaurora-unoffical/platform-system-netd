@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <chrono>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -31,13 +32,12 @@
 
 #include "log/log.h"
 
+#include <android-base/properties.h>
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
-#include <binder/ProcessState.h>
 
 #include "CommandListener.h"
 #include "Controllers.h"
-#include "DnsProxyListener.h"
 #include "FwmarkServer.h"
 #include "MDnsSdListener.h"
 #include "NFLogListener.h"
@@ -48,27 +48,26 @@
 #include "Process.h"
 #include "Stopwatch.h"
 
-using android::status_t;
-using android::sp;
+#include "netd_resolv/resolv_stub.h"
+
 using android::IPCThreadState;
-using android::ProcessState;
-using android::defaultServiceManager;
+using android::status_t;
 using android::net::CommandListener;
-using android::net::DnsProxyListener;
 using android::net::FwmarkServer;
+using android::net::makeNFLogListener;
 using android::net::NetdHwService;
 using android::net::NetdNativeService;
 using android::net::NetlinkManager;
 using android::net::NFLogListener;
-using android::net::makeNFLogListener;
 
 const char* const PID_FILE_PATH = "/data/misc/net/netd_pid";
+constexpr const char DNSPROXYLISTENER_SOCKET_NAME[] = "dnsproxyd";
 
 std::mutex android::net::gBigNetdLock;
 
 int main() {
-    using android::net::gLog;
     using android::net::gCtls;
+    using android::net::gLog;
     Stopwatch s;
     gLog.info("netd 1.0 starting");
 
@@ -79,10 +78,19 @@ int main() {
     // FrameworkListener does this on initialization as well, but we only initialize these
     // components after having initialized other subsystems that can fork.
     for (const auto& sock : { CommandListener::SOCKET_NAME,
-                              DnsProxyListener::SOCKET_NAME,
+                              DNSPROXYLISTENER_SOCKET_NAME,
                               FwmarkServer::SOCKET_NAME,
                               MDnsSdListener::SOCKET_NAME }) {
         setCloseOnExec(sock);
+    }
+
+    // Before we start any threads, populate the resolver stub pointers.
+    resolv_stub_init();
+
+    // Make sure BPF programs are loaded before doing anything
+    while (!android::base::WaitForProperty("bpf.progs_loaded", "1",
+           std::chrono::seconds(5))) {
+        ALOGD("netd waited 5s for bpf.progs_loaded, still waiting...");
     }
 
     NetlinkManager *nm = NetlinkManager::Instance();
@@ -119,10 +127,11 @@ int main() {
 
     // Set local DNS mode, to prevent bionic from proxying
     // back to this service, recursively.
+    // TODO: Check if we could remove it since resolver cache no loger
+    // checks this environment variable after aosp/838050.
     setenv("ANDROID_DNS_MODE", "local", 1);
-    DnsProxyListener dpl(&gCtls->netCtrl, &gCtls->eventReporter);
-    if (dpl.startListener()) {
-        ALOGE("Unable to start DnsProxyListener (%s)", strerror(errno));
+    if (!gCtls->resolverCtrl.initResolver()) {
+        ALOGE("Unable to init resolver");
         exit(1);
     }
 

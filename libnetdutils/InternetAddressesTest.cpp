@@ -130,12 +130,12 @@ TEST(IPAddressTest, GamutOfOperators) {
 TEST(IPAddressTest, ScopeIds) {
     // Scope IDs ignored for IPv4 addresses.
     const IPAddress ones(IPV4_ONES);
-    EXPECT_EQ(0, ones.scope_id());
+    EXPECT_EQ(0U, ones.scope_id());
     const IPAddress ones22(ones, 22);
-    EXPECT_EQ(0, ones22.scope_id());
+    EXPECT_EQ(0U, ones22.scope_id());
     EXPECT_EQ(ones, ones22);
     const IPAddress ones23(ones, 23);
-    EXPECT_EQ(0, ones23.scope_id());
+    EXPECT_EQ(0U, ones23.scope_id());
     EXPECT_EQ(ones22, ones23);
 
     EXPECT_EQ("fe80::1%22", IPAddress(FE80_1, 22).toString());
@@ -144,7 +144,7 @@ TEST(IPAddressTest, ScopeIds) {
     // Verify that given an IPAddress with a scope_id an address without a
     // scope_id can be constructed (just in case it's useful).
     const IPAddress fe80_intf22(FE80_1, 22);
-    EXPECT_EQ(22, fe80_intf22.scope_id());
+    EXPECT_EQ(22U, fe80_intf22.scope_id());
     EXPECT_EQ(fe80_intf22, IPAddress(fe80_intf22));
     EXPECT_EQ(IPAddress(FE80_1), IPAddress(fe80_intf22, 0));
 }
@@ -383,24 +383,22 @@ TEST(IPPrefixTest, TruncationOther) {
             {"2001:db8:cafe:d00d::", 46, "2001:db8:cafc::"},
     };
 
-    int totalTests = 0;
-    for (int i = 0; i < arraysize(testExpectations); i++, totalTests++) {
+    for (const auto& expectation : testExpectations) {
         IPAddress ip;
-        EXPECT_TRUE(IPAddress::forString(testExpectations[i].ip, &ip))
-                << "Failed to parse IP address " << testExpectations[i].ip;
+        EXPECT_TRUE(IPAddress::forString(expectation.ip, &ip))
+                << "Failed to parse IP address " << expectation.ip;
 
         IPAddress ipTruncated;
-        EXPECT_TRUE(IPAddress::forString(testExpectations[i].ipTruncated, &ipTruncated))
-                << "Failed to parse IP address " << testExpectations[i].ipTruncated;
+        EXPECT_TRUE(IPAddress::forString(expectation.ipTruncated, &ipTruncated))
+                << "Failed to parse IP address " << expectation.ipTruncated;
 
-        IPPrefix prefix(ip, testExpectations[i].cidrLen);
+        IPPrefix prefix(ip, expectation.cidrLen);
 
-        EXPECT_EQ(testExpectations[i].cidrLen, prefix.length())
-                << "Unexpected cidrLen " << testExpectations[i].cidrLen;
+        EXPECT_EQ(expectation.cidrLen, prefix.length())
+                << "Unexpected cidrLen " << expectation.cidrLen;
         EXPECT_EQ(ipTruncated, prefix.ip())
                 << "Unexpected IP truncation: " << prefix.ip() << ", expected: " << ipTruncated;
     }
-    EXPECT_EQ(arraysize(testExpectations), totalTests);
 }
 
 TEST(IPPrefixTest, GamutOfOperators) {

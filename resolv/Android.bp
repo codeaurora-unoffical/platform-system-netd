@@ -1,4 +1,9 @@
-cc_library_shared {
+cc_library_headers {
+    name: "libnetd_resolv_headers",
+    export_include_dirs: ["include"],
+}
+
+cc_library {
     name: "libnetd_resolv",
     version_script: "libnetd_resolv.map.txt",
     defaults: ["netd_defaults"],
@@ -15,6 +20,7 @@ cc_library_shared {
         "res_send.cpp",
         "res_state.cpp",
         "res_stats.cpp",
+        "DnsProxyListener.cpp",
         "DnsTlsDispatcher.cpp",
         "DnsTlsQueryMap.cpp",
         "DnsTlsTransport.cpp",
@@ -22,6 +28,7 @@ cc_library_shared {
         "DnsTlsSessionCache.cpp",
         "DnsTlsSocket.cpp",
         "PrivateDnsConfiguration.cpp",
+        "ResolverEventReporter.cpp",
     ],
     // Link everything statically (except for libc) to minimize our dependence
     // on system ABIs
@@ -29,9 +36,21 @@ cc_library_shared {
     static_libs: [
         "libbase",
         "libcrypto",
+        "libcutils",
         "liblog",
         "libnetdutils",
         "libssl",
+        "libsysutils",
+        "netd_event_listener_interface-ndk_platform",
+    ],
+    shared_libs: [
+        "libbinder_ndk",
+        "libstatslog",
+    ],
+    // TODO: Get rid of these include paths used in DnsProxyListener.
+    include_dirs: [
+        "system/netd/include",
+        "system/netd/server",
     ],
     export_include_dirs: ["include"],
     // TODO: pie in the sky: make this code clang-tidy clean
@@ -46,30 +65,57 @@ cc_library_shared {
 }
 
 cc_test {
-    name: "libnetd_resolv_test",
+    name: "resolv_integration_test",
+    test_suites: ["device-tests"],
     defaults: ["netd_defaults"],
-    // Add DnsTls* files since they are not visible outside libnetd_resolv library.
     srcs: [
-        "DnsTlsDispatcher.cpp",
-        "DnsTlsQueryMap.cpp",
-        "DnsTlsTransport.cpp",
-        "DnsTlsServer.cpp",
-        "DnsTlsSessionCache.cpp",
-        "DnsTlsSocket.cpp",
-        "dns_tls_test.cpp",
+        "dns_responder/dns_responder.cpp",
+        "resolver_test.cpp",
     ],
-    // TODO: Remove the include path "system/netd/include" after Fwmark used in DnsTlsTransport is
-    // moved out.
     include_dirs: [
-        "system/netd/include",
         "system/netd/resolv/include",
         "system/netd/server",
     ],
     shared_libs: [
         "libbase",
+        "libbinder",
         "libcrypto",
         "liblog",
-        "libnetdutils",
+        "libnetd_client",
         "libssl",
+        "libutils",
+    ],
+    static_libs: [
+        "libnetd_test_dnsresponder",
+        "libnetd_test_tun_interface",
+        "liblogwrap",
+        "libnetdutils",
+        "netd_aidl_interface-cpp",
+        "netd_event_listener_interface-cpp",
+    ],
+    compile_multilib: "both",
+    sanitize: {
+        address: true,
+        recover: [ "all" ],
+    },
+}
+
+cc_test {
+    name: "resolv_unit_test",
+    defaults: ["netd_defaults"],
+    srcs: [
+        "dns_tls_test.cpp",
+        "libnetd_resolv_test.cpp",
+    ],
+    shared_libs: [
+        "libbase",
+        "libcrypto",
+        "liblog",
+        "libssl",
+    ],
+    static_libs: [
+        "libnetd_resolv",
+        "libnetd_test_dnsresponder",
+        "libnetdutils",
     ],
 }

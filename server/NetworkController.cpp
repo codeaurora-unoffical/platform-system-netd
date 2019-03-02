@@ -30,6 +30,7 @@
 
 #include <android-base/strings.h>
 #include <netd_resolv/resolv.h>
+#include <netd_resolv/resolv_stub.h>
 #include "android/net/INetd.h"
 
 #include "cutils/misc.h"
@@ -221,7 +222,7 @@ uint32_t NetworkController::getNetworkForDnsLocked(unsigned* netId, uid_t uid) c
         // http://b/29498052
         Network *network = getNetworkLocked(*netId);
         if (network && network->getType() == Network::VIRTUAL &&
-                !static_cast<VirtualNetwork *>(network)->getHasDns()) {
+            !RESOLV_STUB.resolv_has_nameservers(*netId)) {
             *netId = mDefaultNetId;
         }
     } else {
@@ -230,7 +231,7 @@ uint32_t NetworkController::getNetworkForDnsLocked(unsigned* netId, uid_t uid) c
         // them). Otherwise, use the default network's DNS servers. We cannot set the explicit bit
         // because we need to be able to fall through a split tunnel to the default network.
         VirtualNetwork* virtualNetwork = getVirtualNetworkForUserLocked(uid);
-        if (virtualNetwork && virtualNetwork->getHasDns()) {
+        if (virtualNetwork && RESOLV_STUB.resolv_has_nameservers(virtualNetwork->getNetId())) {
             *netId = virtualNetwork->getNetId();
         } else {
             // TODO: return an error instead of silently doing the DNS lookup on the wrong network.
@@ -414,7 +415,7 @@ int NetworkController::createPhysicalOemNetwork(Permission permission, unsigned 
     return ret;
 }
 
-int NetworkController::createVirtualNetwork(unsigned netId, bool hasDns, bool secure) {
+int NetworkController::createVirtualNetwork(unsigned netId, bool secure) {
     ScopedWLock lock(mRWLock);
 
     if (!(MIN_NET_ID <= netId && netId <= MAX_NET_ID)) {
@@ -430,7 +431,7 @@ int NetworkController::createVirtualNetwork(unsigned netId, bool hasDns, bool se
     if (int ret = modifyFallthroughLocked(netId, true)) {
         return ret;
     }
-    mNetworks[netId] = new VirtualNetwork(netId, hasDns, secure);
+    mNetworks[netId] = new VirtualNetwork(netId, secure);
     return 0;
 }
 
@@ -472,7 +473,7 @@ int NetworkController::destroyNetwork(unsigned netId) {
     }
     mNetworks.erase(netId);
     delete network;
-    resolv_delete_cache_for_net(netId);
+    RESOLV_STUB.resolv_delete_cache_for_net(netId);
 
     for (auto iter = mIfindexToLastNetId.begin(); iter != mIfindexToLastNetId.end();) {
         if (iter->second == netId) {

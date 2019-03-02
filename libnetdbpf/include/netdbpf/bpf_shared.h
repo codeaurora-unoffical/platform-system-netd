@@ -17,6 +17,7 @@
 #ifndef NETDBPF_BPF_SHARED_H
 #define NETDBPF_BPF_SHARED_H
 
+#include <netdutils/UidConstants.h>
 // const values shared by bpf kernel program bpfloader and netd
 
 
@@ -46,50 +47,36 @@
 
 const int COOKIE_UID_MAP_SIZE = 10000;
 const int UID_COUNTERSET_MAP_SIZE = 2000;
-const int UID_STATS_MAP_SIZE = 10000;
-const int TAG_STATS_MAP_SIZE = 10000;
+const int APP_STATS_MAP_SIZE = 10000;
+const int STATS_MAP_SIZE = 5000;
 const int IFACE_INDEX_NAME_MAP_SIZE = 1000;
 const int IFACE_STATS_MAP_SIZE = 1000;
-const int CONFIGURATION_MAP_SIZE = 1;
+const int CONFIGURATION_MAP_SIZE = 2;
 const int UID_OWNER_MAP_SIZE = 2000;
 
 #define BPF_PATH "/sys/fs/bpf"
 
-#define BPF_EGRESS_PROG_PATH BPF_PATH "/egress_prog"
-#define BPF_INGRESS_PROG_PATH BPF_PATH "/ingress_prog"
-#define XT_BPF_INGRESS_PROG_PATH BPF_PATH "/xt_bpf_ingress_prog"
-#define XT_BPF_EGRESS_PROG_PATH BPF_PATH "/xt_bpf_egress_prog"
-#define XT_BPF_WHITELIST_PROG_PATH BPF_PATH "/xt_bpf_whitelist_prog"
-#define XT_BPF_BLACKLIST_PROG_PATH BPF_PATH "/xt_bpf_blacklist_prog"
+#define BPF_EGRESS_PROG_PATH BPF_PATH "/prog_netd_cgroupskb_egress_stats"
+#define BPF_INGRESS_PROG_PATH BPF_PATH "/prog_netd_cgroupskb_ingress_stats"
+#define XT_BPF_INGRESS_PROG_PATH BPF_PATH "/prog_netd_skfilter_ingress_xtbpf"
+#define XT_BPF_EGRESS_PROG_PATH BPF_PATH "/prog_netd_skfilter_egress_xtbpf"
+#define XT_BPF_WHITELIST_PROG_PATH BPF_PATH "/prog_netd_skfilter_whitelist_xtbpf"
+#define XT_BPF_BLACKLIST_PROG_PATH BPF_PATH "/prog_netd_skfilter_blacklist_xtbpf"
+#define CGROUP_SOCKET_PROG_PATH BPF_PATH "/prog_netd_cgroupsock_inet_create"
 
-#define COOKIE_TAG_MAP_PATH BPF_PATH "/traffic_cookie_tag_map"
-#define UID_COUNTERSET_MAP_PATH BPF_PATH "/traffic_uid_counterset_map"
-#define APP_UID_STATS_MAP_PATH BPF_PATH "/traffic_app_uid_stats_map"
-#define UID_STATS_MAP_PATH BPF_PATH "/traffic_uid_stats_map"
-#define TAG_STATS_MAP_PATH BPF_PATH "/traffic_tag_stats_map"
-#define IFACE_INDEX_NAME_MAP_PATH BPF_PATH "/traffic_iface_index_name_map"
-#define IFACE_STATS_MAP_PATH BPF_PATH "/traffic_iface_stats_map"
-#define CONFIGURATION_MAP_PATH BPF_PATH "/traffic_configuration_map"
-#define UID_OWNER_MAP_PATH BPF_PATH "/traffic_uid_owner_map"
-
-#define BPF_CGROUP_INGRESS_PROG_NAME "cgroup_ingress_prog"
-#define BPF_CGROUP_EGRESS_PROG_NAME "cgroup_egress_prog"
-#define XT_BPF_INGRESS_PROG_NAME "xt_ingress_prog"
-#define XT_BPF_EGRESS_PROG_NAME "xt_egress_prog"
-#define XT_BPF_WHITELIST_PROG_NAME "xt_whitelist_prog"
-#define XT_BPF_BLACKLIST_PROG_NAME "xt_blacklist_prog"
-
-#define COOKIE_TAG_MAP 0xbfceaaffffffffff
-#define UID_COUNTERSET_MAP 0xbfdceeafffffffff
-#define APP_UID_STATS_MAP 0xbfa1daafffffffff
-#define UID_STATS_MAP 0xbfdaafffffffffff
-#define TAG_STATS_MAP 0xbfaaafffffffffff
-#define IFACE_STATS_MAP 0xbf1faceaafffffff
-#define CONFIGURATION_MAP 0Xbfc0fa0affffffff
-#define UID_OWNER_MAP 0xbfbad1d1daffffff
+#define COOKIE_TAG_MAP_PATH BPF_PATH "/map_netd_cookie_tag_map"
+#define UID_COUNTERSET_MAP_PATH BPF_PATH "/map_netd_uid_counterset_map"
+#define APP_UID_STATS_MAP_PATH BPF_PATH "/map_netd_app_uid_stats_map"
+#define STATS_MAP_A_PATH BPF_PATH "/map_netd_stats_map_A"
+#define STATS_MAP_B_PATH BPF_PATH "/map_netd_stats_map_B"
+#define IFACE_INDEX_NAME_MAP_PATH BPF_PATH "/map_netd_iface_index_name_map"
+#define IFACE_STATS_MAP_PATH BPF_PATH "/map_netd_iface_stats_map"
+#define CONFIGURATION_MAP_PATH BPF_PATH "/map_netd_configuration_map"
+#define UID_OWNER_MAP_PATH BPF_PATH "/map_netd_uid_owner_map"
+#define UID_PERMISSION_MAP_PATH BPF_PATH "/map_netd_uid_permission_map"
 
 enum UidOwnerMatchType {
-    NO_MATCH,
+    NO_MATCH = 0,
     HAPPY_BOX_MATCH = (1 << 0),
     PENALTY_BOX_MATCH = (1 << 1),
     DOZABLE_MATCH = (1 << 2),
@@ -97,17 +84,26 @@ enum UidOwnerMatchType {
     POWERSAVE_MATCH = (1 << 4),
 };
 
+enum UidPermissionType {
+    NO_PERMISSION = 0,
+    ALLOW_SOCK_CREATE = (1 << 0),
+    ALLOW_UPDATE_DEVICE_STATS = (1 << 1),
+};
+
+// In production we use two identical stats maps to record per uid stats and
+// do swap and clean based on the configuration specified here. The statsMapType
+// value in configuration map specified which map is currently in use.
+enum StatsMapType {
+    SELECT_MAP_A,
+    SELECT_MAP_B,
+};
+
 // TODO: change the configuration object from an 8-bit bitmask to an object with clearer
 // semantics, like a struct.
 typedef uint8_t BpfConfig;
 const BpfConfig DEFAULT_CONFIG = 0;
 
-// These are also defined in NetdConstants.h, but we want to minimize the number of headers
-// included by the BPF kernel program.
-// TODO: refactor the the following constant into a seperate file so
-// NetdConstants.h can also include it from there.
-#define MIN_SYSTEM_UID 0
-#define MAX_SYSTEM_UID 9999
-#define CONFIGURATION_KEY 1
+#define UID_RULES_CONFIGURATION_KEY 1
+#define CURRENT_STATS_MAP_CONFIGURATION_KEY 2
 
 #endif  // NETDBPF_BPF_SHARED_H

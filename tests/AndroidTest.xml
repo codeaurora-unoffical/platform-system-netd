@@ -30,14 +30,5 @@
     <test class="com.android.tradefed.testtype.GTest" >
         <option name="native-test-device-path" value="/data/local/tmp" />
         <option name="module-name" value="netd_integration_test" />
-        <!--
-            On 2018-07-14, TransportTest.SerialQueries_100000 suddenly jumped
-            from ~20s to ~80s runtime in APCT continuous integration, causing
-            netd_integration_test to flake with the default 60s timeout.
-            We're not sure what caused the regression, but it's not due to a change
-            in the Android image and unlikely to affect users.
-            Just bump the timeout to 120s for now.
-        -->
-        <option name="native-test-timeout" value="120000" />
     </test>
 </configuration>

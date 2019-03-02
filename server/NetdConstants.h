@@ -25,9 +25,8 @@
 #include <mutex>
 #include <string>
 
+#include <netdutils/UidConstants.h>
 #include <private/android_filesystem_config.h>
-
-const int MAX_SYSTEM_UID = AID_APP - 1;
 
 // Referred from SHA256_DIGEST_LENGTH in boringssl
 constexpr size_t SHA256_SIZE = 32;
@@ -58,6 +57,8 @@ void setCloseOnExec(const char *sock);
 
 const uid_t INVALID_UID = static_cast<uid_t>(-1);
 
+constexpr char TCP_RMEM_PROC_FILE[] = "/proc/sys/net/ipv4/tcp_rmem";
+constexpr char TCP_WMEM_PROC_FILE[] = "/proc/sys/net/ipv4/tcp_wmem";
 
 struct AddrinfoDeleter {
     void operator()(struct addrinfo* p) const {

@@ -49,7 +49,6 @@ constexpr bool kDumpData = false;
 
 #include <android-base/logging.h>
 
-#include "netd_resolv/resolv.h"
 #include "res_state_ext.h"
 #include "resolv_cache.h"
 #include "resolv_private.h"
@@ -1154,8 +1153,6 @@ struct resolv_cache_info {
     int dnsrch_offset[MAXDNSRCH + 1];  // offsets into defdname
 };
 
-#define HTABLE_VALID(x) ((x) != NULL && (x) != HTABLE_DELETED)
-
 static pthread_once_t _res_cache_once = PTHREAD_ONCE_INIT;
 static void res_cache_init(void);
 
@@ -1250,7 +1247,11 @@ static void _cache_notify_waiting_tid_locked(struct resolv_cache* cache, Entry* 
 }
 
 /* notify the cache that the query failed */
-void _resolv_cache_query_failed(unsigned netid, const void* query, int querylen) {
+void _resolv_cache_query_failed(unsigned netid, const void* query, int querylen, uint32_t flags) {
+    // We should not notify with these flags.
+    if (flags & (ANDROID_RESOLV_NO_CACHE_STORE | ANDROID_RESOLV_NO_CACHE_LOOKUP)) {
+        return;
+    }
     Entry key[1];
     Cache* cache;
 
@@ -1267,9 +1268,9 @@ void _resolv_cache_query_failed(unsigned netid, const void* query, int querylen)
     pthread_mutex_unlock(&res_cache_list_lock);
 }
 
-static struct resolv_cache_info* _find_cache_info_locked(unsigned netid);
+static resolv_cache_info* find_cache_info_locked(unsigned netid);
 
-static void _cache_flush_locked(Cache* cache) {
+static void cache_flush_locked(Cache* cache) {
     int nn;
 
     for (nn = 0; nn < cache->max_entries; nn++) {
@@ -1292,25 +1293,12 @@ static void _cache_flush_locked(Cache* cache) {
     VLOG << "*** DNS CACHE FLUSHED ***";
 }
 
-static int _res_cache_get_max_entries(void) {
-    int cache_size = CONFIG_MAX_ENTRIES;
-
-    const char* cache_mode = getenv("ANDROID_DNS_MODE");
-    if (cache_mode == NULL || strcmp(cache_mode, "local") != 0) {
-        // Don't use the cache in local mode. This is used by the proxy itself.
-        cache_size = 0;
-    }
-
-    VLOG << "cache size: " << cache_size;
-    return cache_size;
-}
-
 static struct resolv_cache* _resolv_cache_create(void) {
     struct resolv_cache* cache;
 
     cache = (struct resolv_cache*) calloc(sizeof(*cache), 1);
     if (cache) {
-        cache->max_entries = _res_cache_get_max_entries();
+        cache->max_entries = CONFIG_MAX_ENTRIES;
         cache->entries = (Entry*) calloc(sizeof(*cache->entries), cache->max_entries);
         if (cache->entries) {
             cache->mru_list.mru_prev = cache->mru_list.mru_next = &cache->mru_list;
@@ -1478,7 +1466,11 @@ static void _cache_remove_expired(Cache* cache) {
 }
 
 ResolvCacheStatus _resolv_cache_lookup(unsigned netid, const void* query, int querylen,
-                                       void* answer, int answersize, int* answerlen) {
+                                       void* answer, int answersize, int* answerlen,
+                                       uint32_t flags) {
+    if (flags & ANDROID_RESOLV_NO_CACHE_LOOKUP) {
+        return RESOLV_CACHE_SKIP;
+    }
     Entry key[1];
     Entry** lookup;
     Entry* e;
@@ -1513,6 +1505,11 @@ ResolvCacheStatus _resolv_cache_lookup(unsigned netid, const void* query, int qu
 
     if (e == NULL) {
         VLOG << "NOT IN CACHE";
+        // If it is no-cache-store mode, we won't wait for possible query.
+        if (flags & ANDROID_RESOLV_NO_CACHE_STORE) {
+            result = RESOLV_CACHE_SKIP;
+            goto Exit;
+        }
         // calling thread will wait if an outstanding request is found
         // that matching this query
         if (!_cache_check_pending_request_locked(&cache, key, netid) || cache == NULL) {
@@ -1632,21 +1629,19 @@ Exit:
 // Head of the list of caches.  Protected by _res_cache_list_lock.
 static struct resolv_cache_info res_cache_list;
 
-/* insert resolv_cache_info into the list of resolv_cache_infos */
+// insert resolv_cache_info into the list of resolv_cache_infos
 static void insert_cache_info_locked(resolv_cache_info* cache_info);
-/* creates a resolv_cache_info */
+// creates a resolv_cache_info
 static resolv_cache_info* create_cache_info();
-/* gets a resolv_cache_info associated with a network, or NULL if not found */
-static struct resolv_cache_info* _find_cache_info_locked(unsigned netid);
-/* empty the named cache */
-static void flush_cache_for_net_locked(unsigned netid);
-/* empty the nameservers set for the named cache */
+// gets a resolv_cache_info associated with a network, or NULL if not found
+static resolv_cache_info* find_cache_info_locked(unsigned netid);
+// empty the nameservers set for the named cache
 static void free_nameservers_locked(resolv_cache_info* cache_info);
 // return 1 if the provided list of name servers differs from the list of name servers
 // currently attached to the provided cache_info
 static int resolv_is_nameservers_equal_locked(resolv_cache_info* cache_info, const char** servers,
                                               int numservers);
-/* clears the stats samples contained withing the given cache_info */
+// clears the stats samples contained withing the given cache_info
 static void res_cache_clear_stats_locked(resolv_cache_info* cache_info);
 
 static void res_cache_init(void) {
@@ -1654,7 +1649,18 @@ static void res_cache_init(void) {
     pthread_mutex_init(&res_cache_list_lock, NULL);
 }
 
-/* look up the named cache, and creates one if needed */
+// public API for netd to query if name server is set on specific netid
+bool resolv_has_nameservers(unsigned netid) {
+    pthread_once(&_res_cache_once, res_cache_init);
+    pthread_mutex_lock(&res_cache_list_lock);
+    resolv_cache_info* info = find_cache_info_locked(netid);
+    const bool ret = (info != nullptr) && (info->nscount > 0);
+    pthread_mutex_unlock(&res_cache_list_lock);
+
+    return ret;
+}
+
+// look up the named cache, and creates one if needed
 static resolv_cache* get_res_cache_for_net_locked(unsigned netid) {
     resolv_cache* cache = find_named_cache_locked(netid);
     if (!cache) {
@@ -1673,26 +1679,6 @@ static resolv_cache* get_res_cache_for_net_locked(unsigned netid) {
     return cache;
 }
 
-void _resolv_flush_cache_for_net(unsigned netid) {
-    pthread_once(&_res_cache_once, res_cache_init);
-    pthread_mutex_lock(&res_cache_list_lock);
-
-    flush_cache_for_net_locked(netid);
-
-    pthread_mutex_unlock(&res_cache_list_lock);
-}
-
-static void flush_cache_for_net_locked(unsigned netid) {
-    resolv_cache* cache = find_named_cache_locked(netid);
-    if (cache) {
-        _cache_flush_locked(cache);
-    }
-
-    // Also clear the NS statistics.
-    resolv_cache_info* cache_info = _find_cache_info_locked(netid);
-    res_cache_clear_stats_locked(cache_info);
-}
-
 void resolv_delete_cache_for_net(unsigned netid) {
     pthread_once(&_res_cache_once, res_cache_init);
     pthread_mutex_lock(&res_cache_list_lock);
@@ -1704,7 +1690,7 @@ void resolv_delete_cache_for_net(unsigned netid) {
 
         if (cache_info->netid == netid) {
             prev_cache_info->next = cache_info->next;
-            _cache_flush_locked(cache_info->cache);
+            cache_flush_locked(cache_info->cache);
             free(cache_info->cache->entries);
             free(cache_info->cache);
             free_nameservers_locked(cache_info);
@@ -1729,12 +1715,12 @@ static void insert_cache_info_locked(struct resolv_cache_info* cache_info) {
 }
 
 static resolv_cache* find_named_cache_locked(unsigned netid) {
-    struct resolv_cache_info* info = _find_cache_info_locked(netid);
+    resolv_cache_info* info = find_cache_info_locked(netid);
     if (info != NULL) return info->cache;
     return NULL;
 }
 
-static struct resolv_cache_info* _find_cache_info_locked(unsigned netid) {
+static resolv_cache_info* find_cache_info_locked(unsigned netid) {
     struct resolv_cache_info* cache_info = res_cache_list.next;
 
     while (cache_info) {
@@ -1755,7 +1741,7 @@ static void resolv_set_default_params(struct __res_params* params) {
     params->base_timeout_msec = 0;  // 0 = legacy algorithm
 }
 
-int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigned numservers,
+int resolv_set_nameservers_for_net(unsigned netid, const char** servers, const int numservers,
                                    const char* domains, const __res_params* params) {
     char* cp;
     int* offset;
@@ -1770,7 +1756,7 @@ int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigne
     // As a side effect this also reduces the time the lock is kept.
     char sbuf[NI_MAXSERV];
     snprintf(sbuf, sizeof(sbuf), "%u", NAMESERVER_PORT);
-    for (unsigned i = 0; i < numservers; i++) {
+    for (int i = 0; i < numservers; i++) {
         // The addrinfo structures allocated here are freed in free_nameservers_locked().
         const addrinfo hints = {
                 .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM, .ai_flags = AI_NUMERICHOST};
@@ -1791,7 +1777,7 @@ int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigne
     // creates the cache if not created
     get_res_cache_for_net_locked(netid);
 
-    struct resolv_cache_info* cache_info = _find_cache_info_locked(netid);
+    resolv_cache_info* cache_info = find_cache_info_locked(netid);
 
     if (cache_info != NULL) {
         uint8_t old_max_samples = cache_info->params.max_samples;
@@ -1804,8 +1790,7 @@ int resolv_set_nameservers_for_net(unsigned netid, const char** servers, unsigne
         if (!resolv_is_nameservers_equal_locked(cache_info, servers, numservers)) {
             // free current before adding new
             free_nameservers_locked(cache_info);
-            unsigned i;
-            for (i = 0; i < numservers; i++) {
+            for (int i = 0; i < numservers; i++) {
                 cache_info->nsaddrinfo[i] = nsaddrinfo[i];
                 cache_info->nameservers[i] = strdup(servers[i]);
                 VLOG << __func__ << ": netid = " << netid << ", addr = " << servers[i];
@@ -1916,7 +1901,7 @@ void _resolv_populate_res_for_net(res_state statp) {
     pthread_once(&_res_cache_once, res_cache_init);
     pthread_mutex_lock(&res_cache_list_lock);
 
-    struct resolv_cache_info* info = _find_cache_info_locked(statp->netid);
+    resolv_cache_info* info = find_cache_info_locked(statp->netid);
     if (info != NULL) {
         int nserv;
         struct addrinfo* ai;
@@ -1989,7 +1974,7 @@ int android_net_res_stats_get_info_for_net(unsigned netid, int* nscount,
     int revision_id = -1;
     pthread_mutex_lock(&res_cache_list_lock);
 
-    struct resolv_cache_info* info = _find_cache_info_locked(netid);
+    resolv_cache_info* info = find_cache_info_locked(netid);
     if (info) {
         if (info->nscount > MAXNS) {
             pthread_mutex_unlock(&res_cache_list_lock);
@@ -2053,7 +2038,7 @@ int resolv_cache_get_resolver_stats(unsigned netid, __res_params* params, res_st
     int revision_id = -1;
     pthread_mutex_lock(&res_cache_list_lock);
 
-    struct resolv_cache_info* info = _find_cache_info_locked(netid);
+    resolv_cache_info* info = find_cache_info_locked(netid);
     if (info) {
         memcpy(stats, info->nsstats, sizeof(info->nsstats));
         *params = info->params;
@@ -2070,7 +2055,7 @@ void _resolv_cache_add_resolver_stats_sample(unsigned netid, int revision_id, in
 
     pthread_mutex_lock(&res_cache_list_lock);
 
-    struct resolv_cache_info* info = _find_cache_info_locked(netid);
+    resolv_cache_info* info = find_cache_info_locked(netid);
 
     if (info && info->revision_id == revision_id) {
         _res_cache_add_stats_sample_locked(&info->nsstats[ns], sample, max_samples);

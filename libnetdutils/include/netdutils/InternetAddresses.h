@@ -203,8 +203,11 @@ class IPPrefix {
 
     constexpr sa_family_t family() const noexcept { return mData.family; }
     IPAddress ip() const noexcept { return IPAddress(mData); }
+    in_addr addr4() const noexcept { return mData.ip.v4; }
+    in6_addr addr6() const noexcept { return mData.ip.v6; }
     constexpr int length() const noexcept { return mData.cidrlen; }
 
+    bool isUninitialized() const noexcept;
     std::string toString() const noexcept;
 
     friend std::ostream& operator<<(std::ostream& os, const IPPrefix& prefix) {

@@ -18,6 +18,7 @@ package android.net;
 
 import android.net.UidRangeParcel;
 import android.net.TetherStatsParcel;
+import android.net.INetdUnsolicitedEventListener;
 import android.net.InterfaceConfigurationParcel;
 
 /** {@hide} */
@@ -78,13 +79,12 @@ interface INetd {
      * Creates a VPN network.
      *
      * @param netId the network to create.
-     * @param hasDns whether the VPN has DNS servers.
      * @param secure whether unprivileged apps are allowed to bypass the VPN.
      *
      * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
      *         unix errno.
      */
-    void networkCreateVpn(int netId, boolean hasDns, boolean secure);
+    void networkCreateVpn(int netId, boolean secure);
 
     /**
      * Destroys a network. Any interfaces added to the network are removed, and the network ceases
@@ -221,6 +221,7 @@ interface INetd {
      * @param netId the network ID of the network for which information should be retrieved.
      * @param servers the DNS servers that are currently configured for the network.
      * @param domains the search domains currently configured.
+     * @param tlsServers the DNS-over-TLS servers that are currently configured for the network.
      * @param params the resolver parameters configured, i.e. the contents of __res_params in order.
      * @param stats the stats for each server in the order specified by RESOLVER_STATS_XXX
      *         constants, serialized as an int array. The contents of this array are the number of
@@ -237,9 +238,12 @@ interface INetd {
      *         RESOLVER_STATS_COUNT*N + RESOLVER_STATS_TIMEOUTS
      * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
      *         unix errno.
+     *
+     * TODO: Consider replacing stats and params with parcelables.
      */
     void getResolverInfo(int netId, out @utf8InCpp String[] servers,
-            out @utf8InCpp String[] domains, out int[] params, out int[] stats);
+            out @utf8InCpp String[] domains, out @utf8InCpp String[] tlsServers, out int[] params,
+            out int[] stats);
 
     /**
      * Instruct the tethering DNS server to reevaluated serving interfaces.
@@ -299,25 +303,14 @@ interface INetd {
     void setProcSysNet(int ipversion, int which, in @utf8InCpp String ifname,
             in @utf8InCpp String parameter, in @utf8InCpp String value);
 
-    /**
-     * Get/Set metrics reporting level.
-     *
-     * Reporting level is one of:
-     *     0 (NONE)
-     *     1 (METRICS)
-     *     2 (FULL)
-     */
-    int getMetricsReportingLevel();
-    void setMetricsReportingLevel(int level);
-
    /**
-    * Sets owner of socket FileDescriptor to the new UID, checking to ensure that the caller's
+    * Sets owner of socket ParcelFileDescriptor to the new UID, checking to ensure that the caller's
     * uid is that of the old owner's, and that this is a UDP-encap socket
     *
-    * @param FileDescriptor socket Socket file descriptor
+    * @param ParcelFileDescriptor socket Socket file descriptor
     * @param int newUid UID of the new socket fd owner
     */
-    void ipSecSetEncapSocketOwner(in FileDescriptor socket, int newUid);
+    void ipSecSetEncapSocketOwner(in ParcelFileDescriptor socket, int newUid);
 
    /**
     * Reserve an SPI from the kernel
@@ -342,7 +335,8 @@ interface INetd {
     * @param mode either Transport or Tunnel mode
     * @param sourceAddress InetAddress as string for the sending endpoint
     * @param destinationAddress InetAddress as string for the receiving endpoint
-    * @param underlyingNetId the netId of the network to which the SA is applied
+    * @param underlyingNetId the netId of the network to which the SA is applied. Only accepted for
+    *        tunnel mode SAs.
     * @param spi a 32-bit unique ID allocated to the user
     * @param markValue a 32-bit unique ID chosen by the user
     * @param markMask a 32-bit mask chosen by the user
@@ -359,6 +353,8 @@ interface INetd {
     * @param encapType encapsulation type used (if any) for the udp encap socket
     * @param encapLocalPort the port number on the host to be used in encap packets
     * @param encapRemotePort the port number of the remote to be used for encap packets
+    * @param interfaceId the identifier for the IPsec tunnel interface.
+    *        Only accepted for tunnel mode SAs.
     */
     void ipSecAddSecurityAssociation(
             int transformId,
@@ -374,7 +370,8 @@ interface INetd {
             in @utf8InCpp String aeadAlgo, in byte[] aeadKey, in int aeadIcvBits,
             int encapType,
             int encapLocalPort,
-            int encapRemotePort);
+            int encapRemotePort,
+            int interfaceId);
 
    /**
     * Delete a previously created security association identified by the provided parameters
@@ -385,6 +382,7 @@ interface INetd {
     * @param spi a requested 32-bit unique ID allocated to the user
     * @param markValue a 32-bit unique ID chosen by the user
     * @param markMask a 32-bit mask chosen by the user
+    * @param interfaceId the identifier for the IPsec tunnel interface.
     */
     void ipSecDeleteSecurityAssociation(
             int transformId,
@@ -392,7 +390,8 @@ interface INetd {
             in @utf8InCpp String destinationAddress,
             int spi,
             int markValue,
-            int markMask);
+            int markMask,
+            int interfaceId);
 
    /**
     * Apply a previously created SA to a specified socket, starting IPsec on that socket
@@ -405,7 +404,7 @@ interface INetd {
     * @param spi a 32-bit unique ID allocated to the user (socket owner)
     */
     void ipSecApplyTransportModeTransform(
-            in FileDescriptor socket,
+            in ParcelFileDescriptor socket,
             int transformId,
             int direction,
             in @utf8InCpp String sourceAddress,
@@ -419,7 +418,7 @@ interface INetd {
     * @param socket a user-provided socket from which to remove any IPsec configuration
     */
     void ipSecRemoveTransportModeTransform(
-            in FileDescriptor socket);
+            in ParcelFileDescriptor socket);
 
    /**
     * Adds an IPsec global policy.
@@ -432,6 +431,7 @@ interface INetd {
     * @param spi a 32-bit unique ID allocated to the user
     * @param markValue a 32-bit unique ID chosen by the user
     * @param markMask a 32-bit mask chosen by the user
+    * @param interfaceId the identifier for the IPsec tunnel interface.
     */
     void ipSecAddSecurityPolicy(
             int transformId,
@@ -441,7 +441,8 @@ interface INetd {
             in @utf8InCpp String tmplDstAddress,
             int spi,
             int markValue,
-            int markMask);
+            int markMask,
+            int interfaceId);
 
    /**
     * Updates an IPsec global policy.
@@ -454,6 +455,7 @@ interface INetd {
     * @param spi a 32-bit unique ID allocated to the user
     * @param markValue a 32-bit unique ID chosen by the user
     * @param markMask a 32-bit mask chosen by the user
+    * @param interfaceId the identifier for the IPsec tunnel interface.
     */
     void ipSecUpdateSecurityPolicy(
             int transformId,
@@ -463,7 +465,8 @@ interface INetd {
             in @utf8InCpp String tmplDstAddress,
             int spi,
             int markValue,
-            int markMask);
+            int markMask,
+            int interfaceId);
 
    /**
     * Deletes an IPsec global policy.
@@ -476,56 +479,62 @@ interface INetd {
     * @param direction DIRECTION_IN or DIRECTION_OUT
     * @param markValue a 32-bit unique ID chosen by the user
     * @param markMask a 32-bit mask chosen by the user
+    * @param interfaceId the identifier for the IPsec tunnel interface.
     */
     void ipSecDeleteSecurityPolicy(
             int transformId,
             int selAddrFamily,
             int direction,
             int markValue,
-            int markMask);
+            int markMask,
+            int interfaceId);
 
     // This could not be declared as @uft8InCpp; thus, when used in native code it must be
     // converted from a UTF-16 string to an ASCII string.
     const String IPSEC_INTERFACE_PREFIX = "ipsec";
 
    /**
-    * Add a Virtual Tunnel Interface.
+    * Add a IPsec Tunnel Interface.
     *
     * @param devName a unique identifier that represents the name of the device
     * @param localAddress InetAddress as string for the local endpoint
     * @param remoteAddress InetAddress as string for the remote endpoint
     * @param iKey, to match Policies and SAs for input packets.
     * @param oKey, to match Policies and SAs for output packets.
+    * @param interfaceId the identifier for the IPsec tunnel interface.
     */
-    void addVirtualTunnelInterface(
+    void ipSecAddTunnelInterface(
             in @utf8InCpp String deviceName,
             in @utf8InCpp String localAddress,
             in @utf8InCpp String remoteAddress,
             int iKey,
-            int oKey);
+            int oKey,
+            int interfaceId);
 
    /**
-    * Update a Virtual Tunnel Interface.
+    * Update a IPsec Tunnel Interface.
     *
     * @param devName a unique identifier that represents the name of the device
     * @param localAddress InetAddress as string for the local endpoint
     * @param remoteAddress InetAddress as string for the remote endpoint
     * @param iKey, to match Policies and SAs for input packets.
     * @param oKey, to match Policies and SAs for output packets.
+    * @param interfaceId the identifier for the IPsec tunnel interface.
     */
-    void updateVirtualTunnelInterface(
+    void ipSecUpdateTunnelInterface(
             in @utf8InCpp String deviceName,
             in @utf8InCpp String localAddress,
             in @utf8InCpp String remoteAddress,
             int iKey,
-            int oKey);
+            int oKey,
+            int interfaceId);
 
    /**
-    * Removes a Virtual Tunnel Interface.
+    * Removes a IPsec Tunnel Interface.
     *
     * @param devName a unique identifier that represents the name of the device
     */
-    void removeVirtualTunnelInterface(in @utf8InCpp String deviceName);
+    void ipSecRemoveTunnelInterface(in @utf8InCpp String deviceName);
 
    /**
     * Request notification of wakeup packets arriving on an interface. Notifications will be
@@ -803,12 +812,12 @@ interface INetd {
     * Get the interface list which is stored in netd
     * The list contains the interfaces managed by tetherInterfaceAdd/tetherInterfaceRemove
     *
-    * @return ifList interface list result
+    * @return An array of strings containing interface list result
     */
-    @utf8InCpp List<String> tetherInterfaceList();
+    @utf8InCpp String[] tetherInterfaceList();
 
    /**
-    * Set dns forwarder server
+    * Set DNS forwarder server
     *
     * @param netId the upstream network to forward DNS queries to
     * @param dnsAddrs DNS server address to set
@@ -820,9 +829,9 @@ interface INetd {
    /**
     * Return the DNS list set by tetherDnsSet
     *
-    * @return dnsList dns list result
+    * @return An array of strings containing the list of DNS servers
     */
-    @utf8InCpp List<String> tetherDnsList();
+    @utf8InCpp String[] tetherDnsList();
 
     const int LOCAL_NET_ID = 99;
 
@@ -974,6 +983,34 @@ interface INetd {
     void networkClearPermissionForUser(in int[] uids);
 
    /**
+    * NO_PERMISSIONS indicate that the app is uninstalled and the permission need to be revoked or
+    * this app doesn't have either PERMISSION_INTERNET or PERMISSION_UPDATE_DEVICE_STATS
+    */
+    const int NO_PERMISSIONS = 0;
+
+   /**
+    * PERMISSION_INTERNET indicates that the app can create AF_INET and AF_INET6 sockets
+    */
+    const int PERMISSION_INTERNET = 1;
+
+   /**
+    * PERMISSION_UPDATE_DEVICE_STATS is used for system UIDs and privileged apps
+    * that have the UPDATE_DEVICE_STATS permission
+    */
+    const int PERMISSION_UPDATE_DEVICE_STATS = 2;
+
+   /**
+    * Assigns android.permission.INTERNET and/or android.permission.UPDATE_DEVICE_STATS to the uids
+    * specified. Or remove all permissions from the uids.
+    *
+    * @param permission The permission to grant, it could be either PERMISSION_INTERNET and/or
+    *                   PERMISSION_UPDATE_DEVICE_STATS. If the permission is NO_PERMISSIONS, then
+    *                   revoke all permissions for the uids.
+    * @param uids uid of users to grant permission
+    */
+    void trafficSetNetPermForUids(int permission, in int[] uids);
+
+   /**
     * Gives the specified user permission to protect sockets from VPNs.
     * Typically used by VPN apps themselves, to ensure that the sockets
     * they use to communicate with the VPN server aren't routed through
@@ -1062,11 +1099,11 @@ interface INetd {
    /**
     * Get interface list
     *
-    * @return A list of all the interfaces on the system.
+    * @return An array of strings containing all the interfaces on the system.
     * @throws ServiceSpecificException in case of failure, with an error code corresponding to the
     *         unix errno.
     */
-    @utf8InCpp List<String> interfaceGetList();
+    @utf8InCpp String[] interfaceGetList();
 
     const String IF_STATE_UP = "up";
     const String IF_STATE_DOWN = "down";
@@ -1133,4 +1170,56 @@ interface INetd {
     *         cause of the the failure.
     */
     void interfaceSetMtu(in @utf8InCpp String ifName, int mtu);
+
+   /**
+    * Add forwarding rule/stats on given interface.
+    *
+    * @param intIface downstream interface
+    * @param extIface upstream interface
+    */
+    void tetherAddForward(in @utf8InCpp String intIface, in @utf8InCpp String extIface);
+
+   /**
+    * Remove forwarding rule/stats on given interface.
+    *
+    * @param intIface downstream interface
+    * @param extIface upstream interface
+    */
+    void tetherRemoveForward(in @utf8InCpp String intIface, in @utf8InCpp String extIface);
+
+   /**
+    * Set the values of tcp_{rmem,wmem}.
+    *
+    * @param rmemValues the target values of tcp_rmem, each value is separated by spaces
+    * @param wmemValues the target values of tcp_wmem, each value is separated by spaces
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void setTcpRWmemorySize(in @utf8InCpp String rmemValues, in @utf8InCpp String wmemValues);
+
+    /**
+     * Get NAT64 prefix in format Pref64::/n which is described in RFC6147 section 2. This
+     * interface is used for internal test only. Don't use it for other purposes because doing so
+     * would cause race conditions with the NAT64 prefix notifications.
+     *
+     * @param netId the network ID of the network to get the prefix
+     * @return the NAT64 prefix if the query operation was successful
+     * @throws ServiceSpecificException in case of failure, with an error code indicating the
+     *         cause of the the failure.
+     *
+     * TODO: Remove this once the tests have been updated to listen for onNat64PrefixEvent.
+     */
+    @utf8InCpp String getPrefix64(int netId);
+
+   /**
+    * Register unsolicited event listener
+    * Netd supports multiple unsolicited event listeners, but only one per pid
+    * A newer listener won't be registed if netd has an old one on the same pid.
+    *
+    * @param listener unsolicited event listener to register
+    * @throws ServiceSpecificException in case of failure, with an error code indicating the
+    *         cause of the the failure.
+    */
+    void registerUnsolicitedEventListener(INetdUnsolicitedEventListener listener);
+
 }

@@ -30,6 +30,7 @@
 
 #include <array>
 #include <cstdlib>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -53,7 +54,6 @@ namespace android {
 namespace net {
 
 using android::base::Join;
-using android::base::StringAppendF;
 using android::base::StringPrintf;
 using android::netdutils::statusFromErrno;
 using android::netdutils::StatusOr;
@@ -116,8 +116,6 @@ bool inBpToolsMode() {
 }  // namespace
 
 auto TetherController::iptablesRestoreFunction = execIptablesRestoreWithOutput;
-
-const int MAX_IPT_OUTPUT_LINE_LEN = 256;
 
 const std::string GET_TETHER_STATS_COMMAND = StringPrintf(
     "*filter\n"
@@ -326,11 +324,10 @@ bool TetherController::isTetheringStarted() {
 // dnsmasq can't parse commands larger than this due to the fixed-size buffer
 // in check_android_listeners(). The receiving buffer is 1024 bytes long, but
 // dnsmasq reads up to 1023 bytes.
-#define MAX_CMD_SIZE 1023
+const size_t MAX_CMD_SIZE = 1023;
 
+// TODO: convert callers to the overload taking a vector<string>
 int TetherController::setDnsForwarders(unsigned netId, char **servers, int numServers) {
-    int i;
-
     Fwmark fwmark;
     fwmark.netId = netId;
     fwmark.explicitlySelected = true;
@@ -340,7 +337,7 @@ int TetherController::setDnsForwarders(unsigned netId, char **servers, int numSe
     std::string daemonCmd = StringPrintf("update_dns%s0x%x", SEPARATOR, fwmark.intValue);
 
     mDnsForwarders.clear();
-    for (i = 0; i < numServers; i++) {
+    for (int i = 0; i < numServers; i++) {
         ALOGD("setDnsForwarders(0x%x %d = '%s')", fwmark.intValue, i, servers[i]);
 
         addrinfo *res, hints = { .ai_flags = AI_NUMERICHOST };
@@ -508,12 +505,13 @@ int TetherController::setDefaults() {
         "COMMIT\n", LOCAL_FORWARD, LOCAL_FORWARD, LOCAL_NAT_POSTROUTING);
 
     std::string v6Cmd = StringPrintf(
-        "*filter\n"
-        ":%s -\n"
-        "COMMIT\n"
-        "*raw\n"
-        ":%s -\n"
-        "COMMIT\n", LOCAL_FORWARD, LOCAL_RAW_PREROUTING);
+            "*filter\n"
+            ":%s -\n"
+            "COMMIT\n"
+            "*raw\n"
+            ":%s -\n"
+            "COMMIT\n",
+            LOCAL_FORWARD, LOCAL_RAW_PREROUTING);
 
     int res = iptablesRestoreFunction(V4, v4Cmd, nullptr);
     if (res < 0) {
@@ -532,15 +530,13 @@ int TetherController::enableNat(const char* intIface, const char* extIface) {
     ALOGV("enableNat(intIface=<%s>, extIface=<%s>)",intIface, extIface);
 
     if (!isIfaceName(intIface) || !isIfaceName(extIface)) {
-        errno = ENODEV;
-        return -1;
+        return -ENODEV;
     }
 
     /* Bug: b/9565268. "enableNat wlan0 wlan0". For now we fail until java-land is fixed */
     if (!strcmp(intIface, extIface)) {
         ALOGE("Duplicate interface specified: %s %s", intIface, extIface);
-        errno = EINVAL;
-        return -1;
+        return -EINVAL;
     }
 
     if (isForwardingPairEnabled(intIface, extIface)) {
@@ -555,14 +551,14 @@ int TetherController::enableNat(const char* intIface, const char* extIface) {
             "COMMIT\n"
         };
 
-        if (iptablesRestoreFunction(V4, Join(v4Cmds, '\n'), nullptr) ||
-            setupIPv6CountersChain()) {
+        if (iptablesRestoreFunction(V4, Join(v4Cmds, '\n'), nullptr) || setupIPv6CountersChain() ||
+            setTetherGlobalAlertRule()) {
             ALOGE("Error setting postroute rule: iface=%s", extIface);
             if (!isAnyForwardingPairEnabled()) {
                 // unwind what's been done, but don't care about success - what more could we do?
                 setDefaults();
             }
-            return -1;
+            return -EREMOTEIO;
         }
     }
 
@@ -571,11 +567,23 @@ int TetherController::enableNat(const char* intIface, const char* extIface) {
         if (!isAnyForwardingPairEnabled()) {
             setDefaults();
         }
-        errno = ENODEV;
-        return -1;
+        return -ENODEV;
     }
 
     return 0;
+}
+
+int TetherController::setTetherGlobalAlertRule() {
+    // Only add this if we are the first enabled nat
+    if (isAnyForwardingPairEnabled()) {
+        return 0;
+    }
+    const std::string cmds =
+            "*filter\n" +
+            StringPrintf("-I %s -j %s\n", LOCAL_FORWARD, BandwidthController::LOCAL_GLOBAL_ALERT) +
+            "COMMIT\n";
+
+    return iptablesRestoreFunction(V4V6, cmds, nullptr);
 }
 
 int TetherController::setupIPv6CountersChain() {
@@ -588,13 +596,11 @@ int TetherController::setupIPv6CountersChain() {
      * IPv6 tethering doesn't need the state-based conntrack rules, so
      * it unconditionally jumps to the tether counters chain all the time.
      */
-    std::vector<std::string> v6Cmds = {
-        "*filter",
-        StringPrintf("-A %s -g %s", LOCAL_FORWARD, LOCAL_TETHER_COUNTERS_CHAIN),
-        "COMMIT\n"
-    };
+    const std::string v6Cmds =
+            "*filter\n" +
+            StringPrintf("-A %s -g %s\n", LOCAL_FORWARD, LOCAL_TETHER_COUNTERS_CHAIN) + "COMMIT\n";
 
-    return iptablesRestoreFunction(V6, Join(v6Cmds, '\n'), nullptr);
+    return iptablesRestoreFunction(V6, v6Cmds, nullptr);
 }
 
 // Gets a pointer to the ForwardingDownstream for an interface pair in the map, or nullptr
@@ -679,7 +685,7 @@ int TetherController::setForwardRules(bool add, const char *intIface, const char
         "%s %s -i %s -m rpfilter --invert ! -s fe80::/64 -j DROP\n"
         "COMMIT\n", op, LOCAL_RAW_PREROUTING, intIface);
     if (iptablesRestoreFunction(V6, rpfilterCmd, nullptr) == -1 && add) {
-        return -1;
+        return -EREMOTEIO;
     }
 
     std::vector<std::string> v4 = {
@@ -728,7 +734,7 @@ int TetherController::setForwardRules(bool add, const char *intIface, const char
         if (add) {
             setForwardRules(false, intIface, extIface);
         }
-        return -1;
+        return -EREMOTEIO;
     }
 
     if (add) {
@@ -743,7 +749,7 @@ int TetherController::setForwardRules(bool add, const char *intIface, const char
 int TetherController::disableNat(const char* intIface, const char* extIface) {
     if (!isIfaceName(intIface) || !isIfaceName(extIface)) {
         errno = ENODEV;
-        return -1;
+        return -errno;
     }
 
     setForwardRules(false, intIface, extIface);
@@ -781,66 +787,75 @@ void TetherController::addStats(TetherStatsList& statsList, const TetherStats& s
 int TetherController::addForwardChainStats(TetherStatsList& statsList,
                                            const std::string& statsOutput,
                                            std::string &extraProcessingInfo) {
-    int res;
-    std::string statsLine;
-    char iface0[MAX_IPT_OUTPUT_LINE_LEN];
-    char iface1[MAX_IPT_OUTPUT_LINE_LEN];
-    char rest[MAX_IPT_OUTPUT_LINE_LEN];
-
+    enum IndexOfIptChain {
+        ORIG_LINE,
+        PACKET_COUNTS,
+        BYTE_COUNTS,
+        HYPHEN,
+        IFACE0_NAME,
+        IFACE1_NAME,
+        SOURCE,
+        DESTINATION
+    };
     TetherStats stats;
     const TetherStats empty;
-    const char *buffPtr;
-    int64_t packets, bytes;
 
-    std::stringstream stream(statsOutput);
+    static const std::string NUM = "(\\d+)";
+    static const std::string IFACE = "([^\\s]+)";
+    static const std::string DST = "(0.0.0.0/0|::/0)";
+    static const std::string COUNTERS = "\\s*" + NUM + "\\s+" + NUM +
+                                        " RETURN     all(  --  |      )" + IFACE + "\\s+" + IFACE +
+                                        "\\s+" + DST + "\\s+" + DST;
+    static const std::regex IP_RE(COUNTERS);
 
-    // Skip headers.
-    for (int i = 0; i < 2; i++) {
-        std::getline(stream, statsLine, '\n');
-        extraProcessingInfo += statsLine + "\n";
-        if (statsLine.empty()) {
-            ALOGE("Empty header while parsing tethering stats");
-            return -EREMOTEIO;
+    const std::vector<std::string> lines = base::Split(statsOutput, "\n");
+    int headerLine = 0;
+    for (const std::string& line : lines) {
+        // Skip headers.
+        if (headerLine < 2) {
+            if (line.empty()) {
+                ALOGV("Empty header while parsing tethering stats");
+                return -EREMOTEIO;
+            }
+            headerLine++;
+            continue;
         }
-    }
 
-    while (std::getline(stream, statsLine, '\n')) {
-        buffPtr = statsLine.c_str();
+        if (line.empty()) continue;
 
-        /* Clean up, so a failed parse can still print info */
-        iface0[0] = iface1[0] = rest[0] = packets = bytes = 0;
-        if (strstr(buffPtr, "0.0.0.0")) {
-            // IPv4 has -- indicating what to do with fragments...
-            //       26     2373 RETURN     all  --  wlan0  rmnet0  0.0.0.0/0            0.0.0.0/0
-            res = sscanf(buffPtr, "%" SCNd64" %" SCNd64" RETURN all -- %s %s 0.%s",
-                    &packets, &bytes, iface0, iface1, rest);
-        } else {
-            // ... but IPv6 does not.
-            //       26     2373 RETURN     all      wlan0  rmnet0  ::/0                 ::/0
-            res = sscanf(buffPtr, "%" SCNd64" %" SCNd64" RETURN all %s %s ::/%s",
-                    &packets, &bytes, iface0, iface1, rest);
-        }
-        ALOGV("parse res=%d iface0=<%s> iface1=<%s> pkts=%" PRId64" bytes=%" PRId64" rest=<%s> orig line=<%s>", res,
-             iface0, iface1, packets, bytes, rest, buffPtr);
-        extraProcessingInfo += buffPtr;
-        extraProcessingInfo += "\n";
+        extraProcessingInfo = line;
+        std::smatch matches;
+        if (!std::regex_search(line, matches, IP_RE)) return -EREMOTEIO;
+        // Here use IP_RE to distiguish IPv4 and IPv6 iptables.
+        // IPv4 has "--" indicating what to do with fragments...
+        //		 26 	2373 RETURN     all  --  wlan0	rmnet0	0.0.0.0/0			 0.0.0.0/0
+        // ... but IPv6 does not.
+        //		 26 	2373 RETURN 	all      wlan0	rmnet0	::/0				 ::/0
+        // TODO: Replace strtoXX() calls with ParseUint() /ParseInt()
+        int64_t packets = strtoul(matches[PACKET_COUNTS].str().c_str(), nullptr, 10);
+        int64_t bytes = strtoul(matches[BYTE_COUNTS].str().c_str(), nullptr, 10);
+        std::string iface0 = matches[IFACE0_NAME].str();
+        std::string iface1 = matches[IFACE1_NAME].str();
+        std::string rest = matches[SOURCE].str();
 
-        if (res != 5) {
-            return -EREMOTEIO;
-        }
+        ALOGV("parse iface0=<%s> iface1=<%s> pkts=%" PRId64 " bytes=%" PRId64
+              " rest=<%s> orig line=<%s>",
+              iface0.c_str(), iface1.c_str(), packets, bytes, rest.c_str(), line.c_str());
         /*
          * The following assumes that the 1st rule has in:extIface out:intIface,
          * which is what TetherController sets up.
          * The 1st matches rx, and sets up the pair for the tx side.
          */
         if (!stats.intIface[0]) {
-            ALOGV("0Filter RX iface_in=%s iface_out=%s rx_bytes=%" PRId64" rx_packets=%" PRId64" ", iface0, iface1, bytes, packets);
+            ALOGV("0Filter RX iface_in=%s iface_out=%s rx_bytes=%" PRId64 " rx_packets=%" PRId64
+                  " ", iface0.c_str(), iface1.c_str(), bytes, packets);
             stats.intIface = iface0;
             stats.extIface = iface1;
             stats.txPackets = packets;
             stats.txBytes = bytes;
         } else if (stats.intIface == iface1 && stats.extIface == iface0) {
-            ALOGV("0Filter TX iface_in=%s iface_out=%s rx_bytes=%" PRId64" rx_packets=%" PRId64" ", iface0, iface1, bytes, packets);
+            ALOGV("0Filter TX iface_in=%s iface_out=%s rx_bytes=%" PRId64 " rx_packets=%" PRId64
+                  " ", iface0.c_str(), iface1.c_str(), bytes, packets);
             stats.rxPackets = packets;
             stats.rxBytes = bytes;
         }

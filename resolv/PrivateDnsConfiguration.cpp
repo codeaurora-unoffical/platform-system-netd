@@ -26,15 +26,15 @@
 #include "netdutils/BackoffSequence.h"
 
 int resolv_set_private_dns_for_net(unsigned netid, uint32_t mark, const char** servers,
-                                   const unsigned numServers, const char* tlsName,
-                                   const uint8_t** fingerprints, const unsigned numFingerprint) {
+                                   const int numServers, const char* tlsName,
+                                   const uint8_t** fingerprints, const int numFingerprint) {
     std::vector<std::string> tlsServers;
-    for (unsigned i = 0; i < numServers; i++) {
+    for (int i = 0; i < numServers; i++) {
         tlsServers.push_back(std::string(servers[i]));
     }
 
     std::set<std::vector<uint8_t>> tlsFingerprints;
-    for (unsigned i = 0; i < numFingerprint; i++) {
+    for (int i = 0; i < numFingerprint; i++) {
         // Each fingerprint stored are 32(SHA256_SIZE) bytes long.
         tlsFingerprints.emplace(std::vector<uint8_t>(fingerprints[i], fingerprints[i] + 32));
     }
@@ -194,25 +194,16 @@ void PrivateDnsConfiguration::getStatus(unsigned netId, ExternalPrivateDnsStatus
 
     const auto netPair = mPrivateDnsTransports.find(netId);
     if (netPair != mPrivateDnsTransports.end()) {
-        status->numServers = netPair->second.size();
         int count = 0;
         for (const auto& serverPair : netPair->second) {
             status->serverStatus[count].ss = serverPair.first.ss;
             status->serverStatus[count].hostname =
                     serverPair.first.name.empty() ? "" : serverPair.first.name.c_str();
             status->serverStatus[count].validation = serverPair.second;
-            /*
-            unsigned numFingerprint = 0;
-            for (const auto& fp : serverPair.first.fingerprints) {
-                std::copy(
-                        fp.begin(), fp.end(),
-                        status->serverStatus[count].fingerprints.fingerprint[numFingerprint].data);
-                numFingerprint++;
-            }
-            status->serverStatus[count].fingerprints.num = numFingerprint;
-            */
             count++;
+            if (count >= MAXNS) break;  // Lose the rest
         }
+        status->numServers = count;
     }
 }
 
@@ -322,9 +313,9 @@ bool PrivateDnsConfiguration::recordPrivateDnsValidation(const DnsTlsServer& ser
 
     // Invoke the callback to send a validation event to NetdEventListenerService.
     if (mCallback != nullptr) {
-        const char* ipLiteral = addrToString(&(server.ss)).c_str();
+        const std::string ipLiteral = addrToString(&(server.ss));
         const char* hostname = server.name.empty() ? "" : server.name.c_str();
-        mCallback(netId, ipLiteral, hostname, success);
+        mCallback(netId, ipLiteral.c_str(), hostname, success);
     }
 
     if (success) {

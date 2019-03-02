@@ -42,7 +42,7 @@ using android::base::StringPrintf;
 namespace android {
 namespace net {
 
-int TunInterface::init() {
+int TunInterface::init(const std::string& ifName) {
     // Generate a random ULA address pair.
     arc4random_buf(&mSrcAddr, sizeof(mSrcAddr));
     mSrcAddr.s6_addr[0] = 0xfd;
@@ -63,7 +63,15 @@ int TunInterface::init() {
     // In order to fit the size of interface alert name , resize ifname to 9
     // Alert name format in netd: ("%sAlert", ifname)
     // Limitation in kernel: char name[15] in struct xt_quota_mtinfo2
-    mIfName = StringPrintf("netd%x", arc4random());
+
+    // Note that this form of alert doesn't actually appear to be used for interface alerts.
+    // It can only be created by BandwidthController::setInterfaceAlert, but that appears to have no
+    // actual callers in the framework, because mActiveAlerts is always empty.
+    // TODO: remove setInterfaceAlert and use a longer interface name.
+    mIfName = ifName;
+    if (mIfName.empty()) {
+        mIfName = StringPrintf("netd%x", arc4random());
+    }
     mIfName.resize(9);
 
     struct ifreq ifr = {

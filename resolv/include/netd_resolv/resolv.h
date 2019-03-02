@@ -32,6 +32,8 @@
  * This header contains declarations related to per-network DNS server selection.
  * They are used by system/netd/ and should not be exposed by the public NDK headers.
  */
+#include <android/multinetwork.h>  // ResNsendFlags
+
 #include <netinet/in.h>
 
 #include "params.h"
@@ -43,7 +45,7 @@ typedef union sockaddr_union {
 } sockaddr_union;
 
 /*
- * Passing NETID_UNSET as the netId causes system/netd/server/DnsProxyListener.cpp to
+ * Passing NETID_UNSET as the netId causes system/netd/resolv/DnsProxyListener.cpp to
  * fill in the appropriate default netId for the query.
  */
 #define NETID_UNSET 0u
@@ -91,7 +93,7 @@ struct android_net_context {
 
 struct ExternalPrivateDnsStatus {
     PrivateDnsMode mode;
-    unsigned numServers;
+    int numServers;
     struct PrivateDnsInfo {
         sockaddr_storage ss;
         const char* hostname;
@@ -99,28 +101,56 @@ struct ExternalPrivateDnsStatus {
     } serverStatus[MAXNS];
 };
 
+/*
+ * Some of functions (e.g. checkCallingPermission()) require the dependency on libbinder.so,
+ * but we can't include the library since it's not stable. Move the functions to netd and use
+ * these function pointers pointing to them.
+ */
+typedef void (*get_network_context_callback)(unsigned netid, uid_t uid,
+                                             android_net_context* netcontext);
+
+// TODO: investigate having the resolver check permissions itself, either by adding support to
+// libbinder_ndk or by converting IPermissionController into a stable AIDL interface.
+typedef bool (*check_calling_permission_callback)(const char* permission);
+
+// TODO: Remove the callback.
 typedef void (*private_dns_validated_callback)(unsigned netid, const char* server,
                                                const char* hostname, bool success);
 
-LIBNETD_RESOLV_PUBLIC hostent* android_gethostbyaddrfornetcontext(const void*, socklen_t, int,
-                                                                  const android_net_context*);
+// TODO: Remove the callback after moving NAT64 prefix discovery out of netd to libnetd_resolv.
+typedef bool (*get_dns64_prefix_callback)(unsigned netid, in6_addr* prefix, uint8_t* prefix_len);
+
+struct dnsproxylistener_callbacks {
+    check_calling_permission_callback check_calling_permission;
+    get_network_context_callback get_network_context;
+    get_dns64_prefix_callback get_dns64_prefix;
+};
+
+LIBNETD_RESOLV_PUBLIC int android_gethostbyaddrfornetcontext(const void*, socklen_t, int,
+                                                             const android_net_context*, hostent**);
 LIBNETD_RESOLV_PUBLIC int android_gethostbynamefornetcontext(const char*, int,
                                                              const android_net_context*, hostent**);
 LIBNETD_RESOLV_PUBLIC int android_getaddrinfofornetcontext(const char*, const char*,
                                                            const addrinfo*,
                                                            const android_net_context*, addrinfo**);
 
+LIBNETD_RESOLV_PUBLIC bool resolv_has_nameservers(unsigned netid);
+
+// Query dns with raw msg
+LIBNETD_RESOLV_PUBLIC int resolv_res_nsend(const android_net_context* netContext,
+                                           const uint8_t* msg, int msgLen, uint8_t* ans, int ansLen,
+                                           int* rcode, uint32_t flags);
+
 // Set name servers for a network
 LIBNETD_RESOLV_PUBLIC int resolv_set_nameservers_for_net(unsigned netid, const char** servers,
-                                                         unsigned numservers, const char* domains,
+                                                         int numservers, const char* domains,
                                                          const __res_params* params);
 
 LIBNETD_RESOLV_PUBLIC int resolv_set_private_dns_for_net(unsigned netid, uint32_t mark,
-                                                         const char** servers,
-                                                         const unsigned numServers,
+                                                         const char** servers, int numServers,
                                                          const char* tlsName,
                                                          const uint8_t** fingerprints,
-                                                         const unsigned numFingerprints);
+                                                         int numFingerprints);
 
 LIBNETD_RESOLV_PUBLIC void resolv_delete_private_dns_for_net(unsigned netid);
 
@@ -128,13 +158,14 @@ LIBNETD_RESOLV_PUBLIC void resolv_get_private_dns_status_for_net(unsigned netid,
                                                                  ExternalPrivateDnsStatus* status);
 
 // Register callback to listen whether private DNS validated
+// TODO: Remove it. Use ResolverEventReporter instead.
 LIBNETD_RESOLV_PUBLIC void resolv_register_private_dns_callback(
         private_dns_validated_callback callback);
 
-// Flush the cache associated with a certain network
-LIBNETD_RESOLV_PUBLIC void resolv_flush_cache_for_net(unsigned netid);
-
 // Delete the cache associated with a certain network
 LIBNETD_RESOLV_PUBLIC void resolv_delete_cache_for_net(unsigned netid);
+
+// Set callbacks to DnsProxyListener, and bring it up.
+LIBNETD_RESOLV_PUBLIC bool resolv_init(const dnsproxylistener_callbacks& callbacks);
 
 #endif  // NETD_RESOLV_RESOLV_H
