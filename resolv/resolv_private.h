@@ -54,9 +54,11 @@
 #ifndef NETD_RESOLV_PRIVATE_H
 #define NETD_RESOLV_PRIVATE_H
 
+#include <android-base/logging.h>
 #include <net/if.h>
 #include <resolv.h>
 #include <time.h>
+#include <string>
 
 #include "netd_resolv/params.h"
 #include "netd_resolv/resolv.h"
@@ -128,7 +130,7 @@ typedef struct __res_state* res_state;
 /* Retrieve a local copy of the stats for the given netid. The buffer must have space for
  * MAXNS __resolver_stats. Returns the revision id of the resolvers used.
  */
-int resolv_cache_get_resolver_stats(unsigned netid, __res_params* params, res_stats stats[MAXNS]);
+int resolv_cache_get_resolver_stats(unsigned netid, res_params* params, res_stats stats[MAXNS]);
 
 /* Add a sample to the shared struct for the given netid and server, provided that the
  * revision_id of the stored servers has not changed.
@@ -233,7 +235,8 @@ int res_queriesmatch(const u_char*, const u_char*, const u_char*, const u_char*)
 const char* p_section(int, int);
 /* Things involving a resolver context. */
 int res_ninit(res_state);
-void res_pquery(const res_state, const u_char*, int, FILE*);
+void res_pquery(const res_state, const u_char*, int);
+
 int res_nquery(res_state, const char*, int, int, u_char*, int, int*);
 int res_nsearch(res_state, const char*, int, int, u_char*, int, int*);
 int res_nquerydomain(res_state, const char*, const char*, int, int, u_char*, int, int*);
@@ -250,12 +253,13 @@ int res_getservers(res_state, sockaddr_union*, int);
 struct android_net_context; /* forward */
 void res_setnetcontext(res_state, const struct android_net_context*);
 
-u_int res_randomid(void);
-
 int getaddrinfo_numeric(const char* hostname, const char* servname, addrinfo hints,
                         addrinfo** result);
 
 // Helper function for converting h_errno to the error codes visible to netd
 int herrnoToAiErrno(int herrno);
+
+// switch resolver log severity
+android::base::LogSeverity logSeverityStrToEnum(const std::string& logSeverityStr);
 
 #endif  // NETD_RESOLV_PRIVATE_H

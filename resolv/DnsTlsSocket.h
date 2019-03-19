@@ -17,9 +17,9 @@
 #ifndef _DNS_DNSTLSSOCKET_H
 #define _DNS_DNSTLSSOCKET_H
 
+#include <openssl/ssl.h>
 #include <future>
 #include <mutex>
-#include <openssl/ssl.h>
 
 #include <android-base/thread_annotations.h>
 #include <android-base/unique_fd.h>
@@ -29,15 +29,12 @@
 #include "DnsTlsServer.h"
 #include "IDnsTlsSocket.h"
 #include "LockedQueue.h"
-#include "params.h"
 
 namespace android {
 namespace net {
 
 class IDnsTlsSocketObserver;
 class DnsTlsSessionCache;
-
-using netdutils::Slice;
 
 // A class for managing a TLS socket that sends and receives messages in
 // [length][value] format, with a 2-byte length (i.e. DNS-over-TCP format).
@@ -50,9 +47,8 @@ using netdutils::Slice;
 class DnsTlsSocket : public IDnsTlsSocket {
   public:
     DnsTlsSocket(const DnsTlsServer& server, unsigned mark,
-                 IDnsTlsSocketObserver* _Nonnull observer,
-                 DnsTlsSessionCache* _Nonnull cache) :
-            mMark(mark), mServer(server), mObserver(observer), mCache(cache) {}
+                 IDnsTlsSocketObserver* _Nonnull observer, DnsTlsSessionCache* _Nonnull cache)
+        : mMark(mark), mServer(server), mObserver(observer), mCache(cache) {}
     ~DnsTlsSocket();
 
     // Creates the SSL context for this session and connect.  Returns false on failure.
@@ -66,9 +62,9 @@ class DnsTlsSocket : public IDnsTlsSocket {
     // notified that the socket is closed.
     // Note that success here indicates successful sending, not receipt of a response.
     // Thread-safe.
-    bool query(uint16_t id, const Slice query) override;
+    bool query(uint16_t id, const netdutils::Slice query) override EXCLUDES(mLock);
 
-private:
+  private:
     // Lock to be held by the SSL event loop thread.  This is not normally in contention.
     std::mutex mLock;
 
@@ -89,16 +85,25 @@ private:
     void sslDisconnect() REQUIRES(mLock);
 
     // Writes a buffer to the socket.
-    bool sslWrite(const Slice buffer) REQUIRES(mLock);
+    bool sslWrite(const netdutils::Slice buffer) REQUIRES(mLock);
 
     // Reads exactly the specified number of bytes from the socket, or fails.
     // Returns SSL_ERROR_NONE on success.
     // If |wait| is true, then this function always blocks.  Otherwise, it
     // will return SSL_ERROR_WANT_READ if there is no data from the server to read.
-    int sslRead(const Slice buffer, bool wait) REQUIRES(mLock);
+    int sslRead(const netdutils::Slice buffer, bool wait) REQUIRES(mLock);
 
     bool sendQuery(const std::vector<uint8_t>& buf) REQUIRES(mLock);
     bool readResponse() REQUIRES(mLock);
+
+    // Similar to query(), this function uses incrementEventFd to send a message to the
+    // loop thread.  However, instead of incrementing the counter by one (indicating a
+    // new query), it wraps the counter to negative, which we use to indicate a shutdown
+    // request.
+    void requestLoopShutdown() EXCLUDES(mLock);
+
+    // This function sends a message to the loop thread by incrementing mEventFd.
+    bool incrementEventFd(int64_t count) EXCLUDES(mLock);
 
     // Queue of pending queries.  query() pushes items onto the queue and notifies
     // the loop thread by incrementing mEventFd.  loop() reads items off the queue.
@@ -107,8 +112,10 @@ private:
     // eventfd socket used for notifying the SSL thread when queries are ready to send.
     // This socket acts similarly to an atomic counter, incremented by query() and cleared
     // by loop().  We have to use a socket because the SSL thread needs to wait in poll()
-    // for input from either a remote server or a query thread.
-    // EOF indicates a close request.
+    // for input from either a remote server or a query thread.  Since eventfd does not have
+    // EOF, we indicate a close request by setting the counter to a negative number.
+    // This file descriptor is opened by initialize(), and closed implicitly after
+    // destruction.
     base::unique_fd mEventFd;
 
     // SSL Socket fields.

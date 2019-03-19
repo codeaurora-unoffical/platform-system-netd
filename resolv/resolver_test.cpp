@@ -116,30 +116,37 @@ class ResolverTest : public ::testing::Test {
     };
 
     void SetUp() { mDnsClient.SetUp(); }
-    void TearDown() { mDnsClient.TearDown(); }
+    void TearDown() {
+        mDnsClient.netdService()->resolverStopPrefix64Discovery(TEST_NETID);
+        mDnsClient.TearDown();
+    }
 
     bool GetResolverInfo(std::vector<std::string>* servers, std::vector<std::string>* domains,
-                         std::vector<std::string>* tlsServers, __res_params* params,
-                         std::vector<ResolverStats>* stats) {
+                         std::vector<std::string>* tlsServers, res_params* params,
+                         std::vector<ResolverStats>* stats,
+                         int* wait_for_pending_req_timeout_count) {
         using android::net::INetd;
         std::vector<int32_t> params32;
         std::vector<int32_t> stats32;
+        std::vector<int32_t> wait_for_pending_req_timeout_count32{0};
         auto rv = mDnsClient.netdService()->getResolverInfo(TEST_NETID, servers, domains,
-                                                            tlsServers, &params32, &stats32);
+                                                            tlsServers, &params32, &stats32,
+                                                            &wait_for_pending_req_timeout_count32);
+
         if (!rv.isOk() || params32.size() != static_cast<size_t>(INetd::RESOLVER_PARAMS_COUNT)) {
             return false;
         }
-        *params = __res_params {
-            .sample_validity = static_cast<uint16_t>(
-                    params32[INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY]),
-            .success_threshold = static_cast<uint8_t>(
-                    params32[INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD]),
-            .min_samples = static_cast<uint8_t>(
-                    params32[INetd::RESOLVER_PARAMS_MIN_SAMPLES]),
-            .max_samples = static_cast<uint8_t>(
-                    params32[INetd::RESOLVER_PARAMS_MAX_SAMPLES]),
-            .base_timeout_msec = params32[INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC],
+        *params = res_params{
+                .sample_validity =
+                        static_cast<uint16_t>(params32[INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY]),
+                .success_threshold =
+                        static_cast<uint8_t>(params32[INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD]),
+                .min_samples = static_cast<uint8_t>(params32[INetd::RESOLVER_PARAMS_MIN_SAMPLES]),
+                .max_samples = static_cast<uint8_t>(params32[INetd::RESOLVER_PARAMS_MAX_SAMPLES]),
+                .base_timeout_msec = params32[INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC],
+                .retry_count = params32[INetd::RESOLVER_PARAMS_RETRY_COUNT],
         };
+        *wait_for_pending_req_timeout_count = wait_for_pending_req_timeout_count32[0];
         return ResolverStats::decodeAll(stats32, stats);
     }
 
@@ -272,6 +279,17 @@ class ResolverTest : public ::testing::Test {
         auto t1 = std::chrono::steady_clock::now();
         ALOGI("%u hosts, %u threads, %u queries, %Es", num_hosts, num_threads, num_queries,
                 std::chrono::duration<double>(t1 - t0).count());
+
+        std::vector<std::string> res_servers;
+        std::vector<std::string> res_domains;
+        std::vector<std::string> res_tls_servers;
+        res_params res_params;
+        std::vector<ResolverStats> res_stats;
+        int wait_for_pending_req_timeout_count;
+        ASSERT_TRUE(GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params,
+                                    &res_stats, &wait_for_pending_req_timeout_count));
+        EXPECT_EQ(0, wait_for_pending_req_timeout_count);
+
         ASSERT_NO_FATAL_FAILURE(mDnsClient.ShutdownDNSServers(&dns));
     }
 
@@ -417,11 +435,9 @@ TEST_F(ResolverTest, GetHostByName_numeric) {
 TEST_F(ResolverTest, BinderSerialization) {
     using android::net::INetd;
     std::vector<int> params_offsets = {
-        INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY,
-        INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD,
-        INetd::RESOLVER_PARAMS_MIN_SAMPLES,
-        INetd::RESOLVER_PARAMS_MAX_SAMPLES,
-        INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC,
+            INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY,   INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD,
+            INetd::RESOLVER_PARAMS_MIN_SAMPLES,       INetd::RESOLVER_PARAMS_MAX_SAMPLES,
+            INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC, INetd::RESOLVER_PARAMS_RETRY_COUNT,
     };
     const int size = static_cast<int>(params_offsets.size());
     EXPECT_EQ(size, INetd::RESOLVER_PARAMS_COUNT);
@@ -461,10 +477,11 @@ TEST_F(ResolverTest, GetHostByName_Binder) {
     std::vector<std::string> res_servers;
     std::vector<std::string> res_domains;
     std::vector<std::string> res_tls_servers;
-    __res_params res_params;
+    res_params res_params;
     std::vector<ResolverStats> res_stats;
-    ASSERT_TRUE(
-            GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params, &res_stats));
+    int wait_for_pending_req_timeout_count;
+    ASSERT_TRUE(GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params,
+                                &res_stats, &wait_for_pending_req_timeout_count));
     EXPECT_EQ(servers.size(), res_servers.size());
     EXPECT_EQ(domains.size(), res_domains.size());
     EXPECT_EQ(0U, res_tls_servers.size());
@@ -619,6 +636,95 @@ TEST_F(ResolverTest, GetAddrInfoForCaseInSensitiveDomains) {
     EXPECT_TRUE(result_str == "1.2.3.4" || result_str == "::1.2.3.4")
         << result_str;
     dns.stopServer();
+}
+
+// Verify if the resolver correctly handle multiple queries simultaneously
+// step 1: set dns server#1 into deferred responding mode.
+// step 2: thread#1 query "hello.example.com." --> resolver send query to server#1.
+// step 3: thread#2 query "hello.example.com." --> resolver hold the request and wait for
+//           response of previous pending query sent by thread#1.
+// step 4: thread#3 query "konbanha.example.com." --> resolver send query to server#3. Server
+//           respond to resolver immediately.
+// step 5: check if server#1 get 1 query by thread#1, server#2 get 0 query, server#3 get 1 query.
+// step 6: resume dns server#1 to respond dns query in step#2.
+// step 7: thread#1 and #2 should get returned from DNS query after step#6. Also, check the
+//           number of queries in server#2 is 0 to ensure thread#2 does not wake up unexpectedly
+//           before signaled by thread#1.
+TEST_F(ResolverTest, GetAddrInfoV4_deferred_resp) {
+    const char* listen_addr1 = "127.0.0.9";
+    const char* listen_addr2 = "127.0.0.10";
+    const char* listen_addr3 = "127.0.0.11";
+    const char* listen_srv = "53";
+    const char* host_name_deferred = "hello.example.com.";
+    const char* host_name_normal = "konbanha.example.com.";
+    test::DNSResponder dns1(listen_addr1, listen_srv, 250, ns_rcode::ns_r_servfail);
+    test::DNSResponder dns2(listen_addr2, listen_srv, 250, ns_rcode::ns_r_servfail);
+    test::DNSResponder dns3(listen_addr3, listen_srv, 250, ns_rcode::ns_r_servfail);
+    dns1.addMapping(host_name_deferred, ns_type::ns_t_a, "1.2.3.4");
+    dns2.addMapping(host_name_deferred, ns_type::ns_t_a, "1.2.3.4");
+    dns3.addMapping(host_name_normal, ns_type::ns_t_a, "1.2.3.5");
+    ASSERT_TRUE(dns1.startServer());
+    ASSERT_TRUE(dns2.startServer());
+    ASSERT_TRUE(dns3.startServer());
+    const std::vector<std::string> servers_for_t1 = {listen_addr1};
+    const std::vector<std::string> servers_for_t2 = {listen_addr2};
+    const std::vector<std::string> servers_for_t3 = {listen_addr3};
+    addrinfo hints = {.ai_family = AF_INET};
+    const std::vector<int> params = {300, 25, 8, 8, 5000};
+    bool t3_task_done = false;
+
+    dns1.setDeferredResp(true);
+    std::thread t1([&, this]() {
+        ASSERT_TRUE(
+                mDnsClient.SetResolversForNetwork(servers_for_t1, kDefaultSearchDomains, params));
+        ScopedAddrinfo result = safe_getaddrinfo(host_name_deferred, nullptr, &hints);
+        // t3's dns query should got returned first
+        EXPECT_TRUE(t3_task_done);
+        EXPECT_EQ(1U, GetNumQueries(dns1, host_name_deferred));
+        EXPECT_TRUE(result != nullptr);
+        EXPECT_EQ("1.2.3.4", ToString(result));
+    });
+
+    // ensuring t1 and t2 handler functions are processed in order
+    usleep(100 * 1000);
+    std::thread t2([&, this]() {
+        ASSERT_TRUE(
+                mDnsClient.SetResolversForNetwork(servers_for_t2, kDefaultSearchDomains, params));
+        ScopedAddrinfo result = safe_getaddrinfo(host_name_deferred, nullptr, &hints);
+        EXPECT_TRUE(t3_task_done);
+        EXPECT_EQ(0U, GetNumQueries(dns2, host_name_deferred));
+        EXPECT_TRUE(result != nullptr);
+        EXPECT_EQ("1.2.3.4", ToString(result));
+
+        std::vector<std::string> res_servers;
+        std::vector<std::string> res_domains;
+        std::vector<std::string> res_tls_servers;
+        res_params res_params;
+        std::vector<ResolverStats> res_stats;
+        int wait_for_pending_req_timeout_count;
+        ASSERT_TRUE(GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params,
+                                    &res_stats, &wait_for_pending_req_timeout_count));
+        EXPECT_EQ(0, wait_for_pending_req_timeout_count);
+    });
+
+    // ensuring t2 and t3 handler functions are processed in order
+    usleep(100 * 1000);
+    std::thread t3([&, this]() {
+        ASSERT_TRUE(
+                mDnsClient.SetResolversForNetwork(servers_for_t3, kDefaultSearchDomains, params));
+        ScopedAddrinfo result = safe_getaddrinfo(host_name_normal, nullptr, &hints);
+        EXPECT_EQ(1U, GetNumQueries(dns1, host_name_deferred));
+        EXPECT_EQ(0U, GetNumQueries(dns2, host_name_deferred));
+        EXPECT_EQ(1U, GetNumQueries(dns3, host_name_normal));
+        EXPECT_TRUE(result != nullptr);
+        EXPECT_EQ("1.2.3.5", ToString(result));
+
+        t3_task_done = true;
+        dns1.setDeferredResp(false);
+    });
+    t3.join();
+    t1.join();
+    t2.join();
 }
 
 TEST_F(ResolverTest, MultidomainResolution) {
@@ -782,6 +888,16 @@ TEST_F(ResolverTest, GetAddrInfoV6_concurrent) {
     for (std::thread& thread : threads) {
         thread.join();
     }
+
+    std::vector<std::string> res_servers;
+    std::vector<std::string> res_domains;
+    std::vector<std::string> res_tls_servers;
+    res_params res_params;
+    std::vector<ResolverStats> res_stats;
+    int wait_for_pending_req_timeout_count;
+    ASSERT_TRUE(GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params,
+                                &res_stats, &wait_for_pending_req_timeout_count));
+    EXPECT_EQ(0, wait_for_pending_req_timeout_count);
 }
 
 TEST_F(ResolverTest, GetAddrInfoStressTest_Binder_100) {
@@ -806,10 +922,11 @@ TEST_F(ResolverTest, EmptySetup) {
     std::vector<std::string> res_servers;
     std::vector<std::string> res_domains;
     std::vector<std::string> res_tls_servers;
-    __res_params res_params;
+    res_params res_params;
     std::vector<ResolverStats> res_stats;
-    ASSERT_TRUE(
-            GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params, &res_stats));
+    int wait_for_pending_req_timeout_count;
+    ASSERT_TRUE(GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params,
+                                &res_stats, &wait_for_pending_req_timeout_count));
     EXPECT_EQ(0U, res_servers.size());
     EXPECT_EQ(0U, res_domains.size());
     EXPECT_EQ(0U, res_tls_servers.size());
@@ -821,6 +938,7 @@ TEST_F(ResolverTest, EmptySetup) {
     EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_MAX_SAMPLES], res_params.max_samples);
     EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC],
               res_params.base_timeout_msec);
+    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_RETRY_COUNT], res_params.retry_count);
 }
 
 TEST_F(ResolverTest, SearchPathChange) {
@@ -912,10 +1030,11 @@ TEST_F(ResolverTest, MaxServerPrune_Binder) {
     std::vector<std::string> res_servers;
     std::vector<std::string> res_domains;
     std::vector<std::string> res_tls_servers;
-    __res_params res_params;
+    res_params res_params;
     std::vector<ResolverStats> res_stats;
-    ASSERT_TRUE(
-            GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params, &res_stats));
+    int wait_for_pending_req_timeout_count;
+    ASSERT_TRUE(GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params,
+                                &res_stats, &wait_for_pending_req_timeout_count));
 
     // Check the size of the stats and its contents.
     EXPECT_EQ(static_cast<size_t>(MAXNS), res_servers.size());
@@ -963,10 +1082,11 @@ TEST_F(ResolverTest, ResolverStats) {
     std::vector<std::string> res_servers;
     std::vector<std::string> res_domains;
     std::vector<std::string> res_tls_servers;
-    __res_params res_params;
+    res_params res_params;
     std::vector<ResolverStats> res_stats;
-    ASSERT_TRUE(
-            GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params, &res_stats));
+    int wait_for_pending_req_timeout_count;
+    ASSERT_TRUE(GetResolverInfo(&res_servers, &res_domains, &res_tls_servers, &res_params,
+                                &res_stats, &wait_for_pending_req_timeout_count));
 
     EXPECT_EQ(1, res_stats[0].timeouts);
     EXPECT_EQ(1, res_stats[1].errors);
@@ -2174,7 +2294,6 @@ TEST_F(ResolverTest, BogusDnsServer) {
 
 TEST_F(ResolverTest, GetAddrInfo_Dns64Synthesize) {
     constexpr char listen_addr[] = "::1";
-    constexpr char listen_addr2[] = "127.0.0.5";
     constexpr char dns64_name[] = "ipv4only.arpa.";
     constexpr char host_name[] = "v4only.example.com.";
     const std::vector<DnsRecord> records = {
@@ -2183,14 +2302,13 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64Synthesize) {
     };
 
     test::DNSResponder dns(listen_addr);
-    test::DNSResponder dns2(listen_addr2);
     StartDns(dns, records);
-    StartDns(dns2, {{dns64_name, ns_type::ns_t_aaaa, "64:ff9b::192.0.0.170"}});
 
     std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // hints are necessary in order to let netd know which type of addresses the caller is
@@ -2198,23 +2316,24 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64Synthesize) {
     const addrinfo hints = {.ai_family = AF_UNSPEC};
     ScopedAddrinfo result = safe_getaddrinfo("v4only", nullptr, &hints);
     EXPECT_TRUE(result != nullptr);
-    EXPECT_LE(1U, GetNumQueries(dns, host_name));
+    // TODO: BUG: there should only be two queries, one AAAA (which returns no records) and one A
+    // (which returns 1.2.3.4). But there is an extra AAAA.
+    EXPECT_EQ(3U, GetNumQueries(dns, host_name));
 
     std::string result_str = ToString(result);
     EXPECT_EQ(result_str, "64:ff9b::102:304");
 
-    // Let's test the case when there's an IPv4 resolver.
-    servers = {listen_addr, listen_addr2};
-    ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
-    dns.clearQueries();
-    dns2.clearQueries();
+    // Stopping NAT64 prefix discovery disables synthesis.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStopPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_FALSE(WaitForPrefix64Detected(TEST_NETID, 300));
 
-    // Netd doesn't detect prefix because there has an IPv4 resolver but all IPv6 resolvers.
-    EXPECT_FALSE(WaitForPrefix64Detected(TEST_NETID, 1000));
+    dns.clearQueries();
 
     result = safe_getaddrinfo("v4only", nullptr, &hints);
     EXPECT_TRUE(result != nullptr);
-    EXPECT_LE(1U, GetNumQueries(dns, host_name));
+    // TODO: BUG: there should only be one query, an AAAA (which returns no records), because the
+    // A is already cached. But there is an extra AAAA.
+    EXPECT_EQ(2U, GetNumQueries(dns, host_name));
 
     result_str = ToString(result);
     EXPECT_EQ(result_str, "1.2.3.4");
@@ -2234,7 +2353,8 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QuerySpecified) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Ensure to synthesize AAAA if AF_INET6 is specified, and not to synthesize AAAA
@@ -2270,7 +2390,8 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QueryUnspecifiedV6) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     const addrinfo hints = {.ai_family = AF_UNSPEC};
@@ -2300,7 +2421,8 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QueryUnspecifiedNoV6) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     const addrinfo hints = {.ai_family = AF_UNSPEC};
@@ -2334,7 +2456,8 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QuerySpecialUseIPv4Addresses) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     static const struct TestConfig {
@@ -2396,7 +2519,8 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QueryWithNullArgumentHints) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Assign argument hints of getaddrinfo() as null is equivalent to set ai_family AF_UNSPEC.
@@ -2436,7 +2560,8 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QueryNullArgumentNode) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // If node is null, return address is listed by libc/getaddrinfo.c as follows.
@@ -2515,7 +2640,8 @@ TEST_F(ResolverTest, GetHostByAddr_ReverseDnsQueryWithHavingNat64Prefix) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Reverse IPv4 DNS query. Prefix should have no effect on it.
@@ -2558,7 +2684,8 @@ TEST_F(ResolverTest, GetHostByAddr_ReverseDns64Query) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Synthesized PTR record doesn't exist on DNS server
@@ -2603,7 +2730,8 @@ TEST_F(ResolverTest, GetHostByAddr_ReverseDns64QueryFromHostFile) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Using synthesized "localhost" address to be a trick for resolving host name
@@ -2644,7 +2772,8 @@ TEST_F(ResolverTest, GetNameInfo_ReverseDnsQueryWithHavingNat64Prefix) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     static const struct TestConfig {
@@ -2722,7 +2851,8 @@ TEST_F(ResolverTest, GetNameInfo_ReverseDns64Query) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     static const struct TestConfig {
@@ -2791,7 +2921,8 @@ TEST_F(ResolverTest, GetNameInfo_ReverseDns64QueryFromHostFile) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Using synthesized "localhost" address to be a trick for resolving host name
@@ -2824,7 +2955,8 @@ TEST_F(ResolverTest, GetHostByName2_Dns64Synthesize) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Query an IPv4-only hostname. Expect that gets a synthesized address.
@@ -2850,7 +2982,8 @@ TEST_F(ResolverTest, GetHostByName2_DnsQueryWithHavingNat64Prefix) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // IPv4 DNS query. Prefix should have no effect on it.
@@ -2890,7 +3023,8 @@ TEST_F(ResolverTest, GetHostByName2_Dns64QuerySpecialUseIPv4Addresses) {
     const std::vector<std::string> servers = {listen_addr};
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
-    // Wait for detecting prefix to complete.
+    // Start NAT64 prefix discovery and wait for it to complete.
+    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     static const struct TestConfig {
