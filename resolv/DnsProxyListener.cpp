@@ -35,8 +35,11 @@
 #include <list>
 #include <vector>
 
+#include <android-base/logging.h>
+#include <android-base/properties.h>
 #include <android-base/stringprintf.h>
-#include <cutils/misc.h>
+#include <android/multinetwork.h>  // ResNsendFlags
+#include <cutils/misc.h>           // FIRST_APPLICATION_UID
 #include <log/log.h>
 #include <netdutils/OperationLimiter.h>
 #include <netdutils/Slice.h>
@@ -46,21 +49,29 @@
 #include <sysutils/SocketClient.h>
 
 // TODO: Considering moving ResponseCode.h Stopwatch.h thread_util.h to libnetdutils.
+#include "DnsProxyListener.h"
 #include "NetdClient.h"  // NETID_USE_LOCAL_NAMESERVERS
+#include "NetdPermissions.h"
+#include "ResolverEventReporter.h"
 #include "ResponseCode.h"
 #include "Stopwatch.h"
-#include "netd_resolv/DnsProxyListener.h"
-#include "netd_resolv/ResolverEventReporter.h"
 #include "netd_resolv/stats.h"  // RCODE_TIMEOUT
 #include "netdutils/InternetAddresses.h"
+#include "resolv_private.h"
 #include "thread_util.h"
 
 using aidl::android::net::metrics::INetdEventListener;
-using android::base::StringPrintf;
 
 static android::net::DnsProxyListener gDnsProxyListener;
 
 bool resolv_init(const dnsproxylistener_callbacks& callbacks) {
+    android::base::InitLogging(/*argv=*/nullptr);
+    android::base::SetDefaultTag("libnetd_resolv");
+    ALOGI("Initializing resolver");
+    const std::string logSeverityStr =
+            android::base::GetProperty("persist.sys.nw_dns_resolver_log", "WARNING");
+    android::base::SetMinimumLogSeverity(logSeverityStrToEnum(logSeverityStr));
+
     if (!gDnsProxyListener.setCallbacks(callbacks)) {
         ALOGE("Unable to set callbacks to DnsProxyListener");
         return false;
@@ -76,12 +87,6 @@ namespace android {
 namespace net {
 
 namespace {
-
-// TODO: move to a separate file (with other constants from FwmarkService and NetdNativeService)
-constexpr const char CONNECTIVITY_USE_RESTRICTED_NETWORKS[] =
-    "android.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS";
-constexpr const char NETWORK_BYPASS_PRIVATE_DNS[] =
-    "android.permission.NETWORK_BYPASS_PRIVATE_DNS";
 
 // Limits the number of outstanding DNS queries by client UID.
 constexpr int MAX_QUERIES_PER_UID = 256;
@@ -154,7 +159,8 @@ bool hasPermissionToBypassPrivateDns(uid_t uid) {
     }
 
     for (const char* const permission :
-         {CONNECTIVITY_USE_RESTRICTED_NETWORKS, NETWORK_BYPASS_PRIVATE_DNS}) {
+         {PERM_CONNECTIVITY_USE_RESTRICTED_NETWORKS, PERM_NETWORK_BYPASS_PRIVATE_DNS,
+          PERM_MAINLINE_NETWORK_STACK}) {
         if (gDnsProxyListener.mCallbacks.check_calling_permission(permission)) {
             return true;
         }
@@ -304,7 +310,10 @@ void reportDnsEvent(int eventType, const android_net_context& netContext, int la
                                latencyUs);
 
     const std::shared_ptr<INetdEventListener> listener = ResolverEventReporter::getListener();
-    if (!listener) return;
+    if (!listener) {
+        ALOGE("DNS event not sent since NetdEventListenerService is unavailable.");
+        return;
+    }
     const int latencyMs = latencyUs / 1000;
     listener->onDnsEvent(netContext.dns_netid, eventType, returnCode, latencyMs, query_name,
                          ip_addrs, total_ip_addr_count, netContext.uid);

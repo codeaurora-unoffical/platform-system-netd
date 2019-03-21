@@ -91,23 +91,6 @@ constexpr const char* validationStatusToString(Validation value) {
     }
 }
 
-void onPrivateDnsValidation(unsigned netId, const char* server, const char* hostname,
-                            bool success) {
-    // Send a validation event to NetdEventListenerService.
-    const auto netdEventListener = net::gCtls->eventReporter.getNetdEventListener();
-    if (netdEventListener != nullptr) {
-        netdEventListener->onPrivateDnsValidationEvent(netId, android::String16(server),
-                                                       android::String16(hostname), success);
-        if (DBG) {
-            ALOGD("Sending validation %s event on netId %u for %s with hostname %s",
-                  success ? "success" : "failure", netId, server, hostname);
-        }
-
-    } else {
-        ALOGE("Validation event not sent since NetdEventListenerService is unavailable.");
-    }
-}
-
 void getNetworkContextCallback(uint32_t netId, uint32_t uid, android_net_context* netcontext) {
     net::gCtls->netCtrl.getNetworkContext(netId, uid, netcontext);
 }
@@ -126,17 +109,11 @@ bool checkCallingPermissionCallback(const char* permission) {
     return checkCallingPermission(String16(permission));
 }
 
-bool allIPv6Only(const std::vector<std::string>& servers) {
-    for (const auto& server : servers) {
-        if (server.find(':') == std::string::npos) return false;
-    }
-    return !servers.empty();
-}
-
 }  // namespace
 
 int ResolverController::setDnsServers(unsigned netId, const char* searchDomains,
-        const char** servers, int numservers, const __res_params* params) {
+                                      const char** servers, int numservers,
+                                      const res_params* params) {
     if (DBG) {
         ALOGD("setDnsServers netId = %u, numservers = %d", netId, numservers);
     }
@@ -156,8 +133,9 @@ int ResolverController::clearDnsServers(unsigned netId) {
 }
 
 int ResolverController::getDnsInfo(unsigned netId, std::vector<std::string>* servers,
-        std::vector<std::string>* domains, __res_params* params,
-        std::vector<android::net::ResolverStats>* stats) {
+                                   std::vector<std::string>* domains, res_params* params,
+                                   std::vector<android::net::ResolverStats>* stats,
+                                   std::vector<int32_t>* wait_for_pending_req_timeout_count) {
     using android::net::ResolverStats;
     using android::net::INetd;
     static_assert(ResolverStats::STATS_SUCCESSES == INetd::RESOLVER_STATS_SUCCESSES &&
@@ -176,10 +154,12 @@ int ResolverController::getDnsInfo(unsigned netId, std::vector<std::string>* ser
     res_stats res_stats[MAXNS];
     servers->clear();
     domains->clear();
-    *params = __res_params{};
+    *params = res_params{};
     stats->clear();
+    int res_wait_for_pending_req_timeout_count;
     int revision_id = RESOLV_STUB.android_net_res_stats_get_info_for_net(
-            netId, &nscount, res_servers, &dcount, res_domains, params, res_stats);
+            netId, &nscount, res_servers, &dcount, res_domains, params, res_stats,
+            &res_wait_for_pending_req_timeout_count);
 
     // If the netId is unknown (which can happen for valid net IDs for which no DNS servers have
     // yet been configured), there is no revision ID. In this case there is no data to return.
@@ -223,6 +203,8 @@ int ResolverController::getDnsInfo(unsigned netId, std::vector<std::string>* ser
     for (int i = 0 ; i < dcount ; ++i) {
         domains->push_back(res_domains[i]);
     }
+
+    (*wait_for_pending_req_timeout_count)[0] = res_wait_for_pending_req_timeout_count;
     return 0;
 }
 
@@ -268,7 +250,6 @@ int ResolverController::setResolverConfiguration(int32_t netId,
     if (err != 0) {
         return err;
     }
-    RESOLV_STUB.resolv_register_private_dns_callback(&onPrivateDnsValidation);
 
     // Convert network-assigned server list to bionic's format.
     server_ptrs.clear();
@@ -287,7 +268,7 @@ int ResolverController::setResolverConfiguration(int32_t netId,
         }
     }
 
-    __res_params res_params = {};
+    res_params res_params = {};
     res_params.sample_validity = params[INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY];
     res_params.success_threshold = params[INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD];
     res_params.min_samples = params[INetd::RESOLVER_PARAMS_MIN_SAMPLES];
@@ -295,42 +276,25 @@ int ResolverController::setResolverConfiguration(int32_t netId,
     if (params.size() > INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC) {
         res_params.base_timeout_msec = params[INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC];
     }
-
-    const auto rval = setDnsServers(netId, domains_str.c_str(), server_ptrs.data(),
-                                    server_ptrs.size(), &res_params);
-
-    if (rval == 0) {
-        // Start DNS64 discovery after successfully setting any new DNS servers
-        // as the cache may have been cleared (if the nameservers differ), and
-        // we might discover a different DNS64 prefix. If the cache has not been
-        // cleared, we may quickly rediscover the same prefix.
-        //
-        // Operators may choose to use a longer TTL in order to reduce repeated
-        // resolution (see also https://tools.ietf.org/html/rfc7050#section-5).
-        if (allIPv6Only(servers)) {
-            // TODO: Keep any existing discovered prefix around for use while
-            // re-discovery is in progress. Otherwise, whenever DNS servers are
-            // pushed to netd there can be gaps where it would appear there was
-            // no prefix64 when in fact we had previously discovered one (and
-            // are highly likely to rediscover the same one).
-            mDns64Configuration.startPrefixDiscovery(netId);
-        } else {
-            mDns64Configuration.stopPrefixDiscovery(netId);
-        }
+    if (params.size() > INetd::RESOLVER_PARAMS_RETRY_COUNT) {
+        res_params.retry_count = params[INetd::RESOLVER_PARAMS_RETRY_COUNT];
     }
 
-    return rval;
+    return setDnsServers(netId, domains_str.c_str(), server_ptrs.data(), server_ptrs.size(),
+                         &res_params);
 }
 
 int ResolverController::getResolverInfo(int32_t netId, std::vector<std::string>* servers,
                                         std::vector<std::string>* domains,
                                         std::vector<std::string>* tlsServers,
-                                        std::vector<int32_t>* params, std::vector<int32_t>* stats) {
+                                        std::vector<int32_t>* params, std::vector<int32_t>* stats,
+                                        std::vector<int32_t>* wait_for_pending_req_timeout_count) {
     using android::net::ResolverStats;
     using android::net::INetd;
-    __res_params res_params;
+    res_params res_params;
     std::vector<ResolverStats> res_stats;
-    int ret = getDnsInfo(netId, servers, domains, &res_params, &res_stats);
+    int ret = getDnsInfo(netId, servers, domains, &res_params, &res_stats,
+                         wait_for_pending_req_timeout_count);
     if (ret != 0) {
         return ret;
     }
@@ -351,7 +315,16 @@ int ResolverController::getResolverInfo(int32_t netId, std::vector<std::string>*
     (*params)[INetd::RESOLVER_PARAMS_MIN_SAMPLES] = res_params.min_samples;
     (*params)[INetd::RESOLVER_PARAMS_MAX_SAMPLES] = res_params.max_samples;
     (*params)[INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC] = res_params.base_timeout_msec;
+    (*params)[INetd::RESOLVER_PARAMS_RETRY_COUNT] = res_params.retry_count;
     return 0;
+}
+
+void ResolverController::startPrefix64Discovery(int32_t netId) {
+    mDns64Configuration.startPrefixDiscovery(netId);
+}
+
+void ResolverController::stopPrefix64Discovery(int32_t netId) {
+    return mDns64Configuration.stopPrefixDiscovery(netId);
 }
 
 // TODO: use StatusOr<T> to wrap the result.
@@ -389,10 +362,12 @@ void ResolverController::dump(DumpWriter& dw, unsigned netId) {
     using android::net::ResolverStats;
     std::vector<std::string> servers;
     std::vector<std::string> domains;
-    __res_params params = {};
+    res_params params = {};
     std::vector<ResolverStats> stats;
+    std::vector<int32_t> wait_for_pending_req_timeout_count(1, 0);
     time_t now = time(nullptr);
-    int rv = getDnsInfo(netId, &servers, &domains, &params, &stats);
+    int rv = getDnsInfo(netId, &servers, &domains, &params, &stats,
+                        &wait_for_pending_req_timeout_count);
     dw.incIndent();
     if (rv != 0) {
         dw.println("getDnsInfo() failed for netid %u", netId);
@@ -455,6 +430,7 @@ void ResolverController::dump(DumpWriter& dw, unsigned netId) {
             }
             dw.decIndent();
         }
+        dw.println("Concurrent DNS query timeout: %d", wait_for_pending_req_timeout_count[0]);
     }
     dw.decIndent();
 }
