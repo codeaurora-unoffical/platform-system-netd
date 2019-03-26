@@ -82,7 +82,6 @@ using android::base::ReadFileToString;
 using android::base::StartsWith;
 using android::base::StringPrintf;
 using android::base::Trim;
-using android::bpf::hasBpfSupport;
 using android::net::INetd;
 using android::net::InterfaceConfigurationParcel;
 using android::net::InterfaceController;
@@ -90,11 +89,6 @@ using android::net::TetherStatsParcel;
 using android::net::TunInterface;
 using android::net::UidRangeParcel;
 using android::netdutils::sSyscalls;
-
-#define SKIP_IF_BPF_SUPPORTED        \
-    do {                             \
-        if (hasBpfSupport()) return; \
-    } while (0)
 
 static const char* IP_RULE_V4 = "-4";
 static const char* IP_RULE_V6 = "-6";
@@ -1288,26 +1282,88 @@ TEST_F(BinderTest, StrictSetUidCleartextPenalty) {
 
 namespace {
 
+std::vector<std::string> findProcesses(const std::string& processName) {
+    // Output looks like:
+    // clat          4963   850 1 12:16:51 ?     00:00:00 clatd-netd10a88 -i netd10a88 ...
+    // ...
+    // root          5221  5219 0 12:18:12 ?     00:00:00 sh -c ps -Af | grep ' clatd-netdcc1a0'
+
+    std::string cmd = StringPrintf("ps -Af | grep '[0-9] %s'", processName.c_str());
+    return runCommand(cmd.c_str());
+}
+
 bool processExists(const std::string& processName) {
-    std::string cmd = StringPrintf("ps -A | grep '%s'", processName.c_str());
-    return (runCommand(cmd.c_str()).size()) ? true : false;
+    return (findProcesses(processName).size()) ? true : false;
 }
 
 }  // namespace
 
 TEST_F(BinderTest, ClatdStartStop) {
     binder::Status status;
-    // use dummy0 for test since it is set ready
-    static const char testIf[] = "dummy0";
-    const std::string clatdName = StringPrintf("clatd-%s", testIf);
 
-    status = mNetd->clatdStart(testIf);
-    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    EXPECT_TRUE(processExists(clatdName));
+    const std::string clatdName = StringPrintf("clatd-%s", sTun.name().c_str());
+    std::string clatAddress;
+    std::string nat64Prefix = "2001:db8:cafe:f00d:1:2::/96";
 
-    mNetd->clatdStop(testIf);
+    // Can't start clatd on an interface that's not part of any network...
+    status = mNetd->clatdStart(sTun.name(), nat64Prefix, &clatAddress);
+    EXPECT_FALSE(status.isOk());
+    EXPECT_EQ(ENODEV, status.serviceSpecificErrorCode());
+
+    // ... so create a test physical network and add our tun to it.
+    EXPECT_TRUE(mNetd->networkCreatePhysical(TEST_NETID1, INetd::PERMISSION_NONE).isOk());
+    EXPECT_TRUE(mNetd->networkAddInterface(TEST_NETID1, sTun.name()).isOk());
+
+    // Prefix must be 96 bits long.
+    status = mNetd->clatdStart(sTun.name(), "2001:db8:cafe:f00d::/64", &clatAddress);
+    EXPECT_FALSE(status.isOk());
+    EXPECT_EQ(EINVAL, status.serviceSpecificErrorCode());
+
+    // Can't start clatd unless there's a default route...
+    status = mNetd->clatdStart(sTun.name(), nat64Prefix, &clatAddress);
+    EXPECT_FALSE(status.isOk());
+    EXPECT_EQ(EADDRNOTAVAIL, status.serviceSpecificErrorCode());
+
+    // so add a default route.
+    EXPECT_TRUE(mNetd->networkAddRoute(TEST_NETID1, sTun.name(), "::/0", "").isOk());
+
+    // Can't start clatd unless there's a global address...
+    status = mNetd->clatdStart(sTun.name(), nat64Prefix, &clatAddress);
+    EXPECT_FALSE(status.isOk());
+    EXPECT_EQ(EADDRNOTAVAIL, status.serviceSpecificErrorCode());
+
+    // ... so add a global address.
+    const std::string v6 = "2001:db8:1:2:f076:ae99:124e:aa99";
+    EXPECT_EQ(0, sTun.addAddress(v6.c_str(), 64));
+
+    // Now expect clatd to start successfully.
+    status = mNetd->clatdStart(sTun.name(), nat64Prefix, &clatAddress);
+    EXPECT_TRUE(status.isOk());
+    EXPECT_EQ(0, status.serviceSpecificErrorCode());
+
+    // Starting it again returns EBUSY.
+    status = mNetd->clatdStart(sTun.name(), nat64Prefix, &clatAddress);
+    EXPECT_FALSE(status.isOk());
+    EXPECT_EQ(EBUSY, status.serviceSpecificErrorCode());
+
+    std::vector<std::string> processes = findProcesses(clatdName);
+    EXPECT_EQ(1U, processes.size());
+
+    // Expect clatd to stop successfully.
+    status = mNetd->clatdStop(sTun.name());
     EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
     EXPECT_FALSE(processExists(clatdName));
+
+    // Stopping a clatd that doesn't exist returns ENODEV.
+    status = mNetd->clatdStop(sTun.name());
+    EXPECT_FALSE(status.isOk());
+    EXPECT_EQ(ENODEV, status.serviceSpecificErrorCode());
+    EXPECT_FALSE(processExists(clatdName));
+
+    // Clean up.
+    EXPECT_TRUE(mNetd->networkRemoveRoute(TEST_NETID1, sTun.name(), "::/0", "").isOk());
+    EXPECT_EQ(0, ifc_del_address(sTun.name().c_str(), v6.c_str(), 64));
+    EXPECT_TRUE(mNetd->networkDestroy(TEST_NETID1).isOk());
 }
 
 namespace {
@@ -1386,16 +1442,22 @@ TEST_F(BinderTest, TestIpfwdEnableDisableStatusForwarding) {
 }
 
 TEST_F(BinderTest, TestIpfwdAddRemoveInterfaceForward) {
-    static const char testFromIf[] = "dummy0";
-    static const char testToIf[] = "dummy0";
+  // Add test physical network
+  EXPECT_TRUE(
+      mNetd->networkCreatePhysical(TEST_NETID1, INetd::PERMISSION_NONE).isOk());
+  EXPECT_TRUE(mNetd->networkAddInterface(TEST_NETID1, sTun.name()).isOk());
+  EXPECT_TRUE(
+      mNetd->networkCreatePhysical(TEST_NETID2, INetd::PERMISSION_NONE).isOk());
+  EXPECT_TRUE(mNetd->networkAddInterface(TEST_NETID2, sTun2.name()).isOk());
 
-    binder::Status status = mNetd->ipfwdAddInterfaceForward(testFromIf, testToIf);
-    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    expectIpfwdRuleExists(testFromIf, testToIf);
+  binder::Status status =
+      mNetd->ipfwdAddInterfaceForward(sTun.name(), sTun2.name());
+  EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+  expectIpfwdRuleExists(sTun.name().c_str(), sTun2.name().c_str());
 
-    status = mNetd->ipfwdRemoveInterfaceForward(testFromIf, testToIf);
-    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    expectIpfwdRuleNotExists(testFromIf, testToIf);
+  status = mNetd->ipfwdRemoveInterfaceForward(sTun.name(), sTun2.name());
+  EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+  expectIpfwdRuleNotExists(sTun.name().c_str(), sTun2.name().c_str());
 }
 
 namespace {

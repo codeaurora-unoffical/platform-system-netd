@@ -19,21 +19,20 @@
 
 #include <stdint.h>
 
-/* Hard-coded defines */
-#define MAXNS 4           /* max # name servers we'll track */
-#define MAXDNSRCH 6       /* max # domains in search path */
-#define MAXDNSRCHPATH 256 /* max length of domain search paths */
-#define MAXNSSAMPLES 64   /* max # samples to store per server */
+#define MAXNS 4            // max # name servers we'll track
+#define MAXDNSRCH 6        // max # domains in search path
+#define MAXDNSRCHPATH 256  // max length of domain search paths
+#define MAXNSSAMPLES 64    // max # samples to store per server
 
 // Per-netid configuration parameters passed from netd to the resolver
-// TODO: rename to res_params
-struct __res_params {
+struct res_params {
     uint16_t sample_validity;  // sample lifetime in s
     // threshold of success / total samples below which a server is considered broken
     uint8_t success_threshold;  // 0: disable, value / 100 otherwise
     uint8_t min_samples;        // min # samples needed for statistics to be considered meaningful
     uint8_t max_samples;        // max # samples taken into account for statistics
     int base_timeout_msec;      // base query retry timeout (if 0, use RES_TIMEOUT)
+    int retry_count;            // number of retries
 };
 
 // The DNS over TLS mode on a specific netId.
