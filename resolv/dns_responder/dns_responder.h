@@ -36,6 +36,11 @@ struct DNSHeader;
 struct DNSQuestion;
 struct DNSRecord;
 
+inline const std::string kDefaultListenAddr = "127.0.0.3";
+inline const std::string kDefaultListenService = "53";
+inline const int kDefaultPollTimoutMillis = 250;
+inline const ns_rcode kDefaultErrorCode = ns_rcode::ns_r_servfail;
+
 /*
  * Simple DNS responder, which replies to queries with the registered response
  * for that type. Class is assumed to be IN. If no response is registered, the
@@ -43,8 +48,10 @@ struct DNSRecord;
  */
 class DNSResponder {
   public:
-    DNSResponder(std::string listen_address, std::string listen_service, int poll_timeout_ms,
-                 ns_rcode error_rcode);
+    DNSResponder(std::string listen_address = kDefaultListenAddr,
+                 std::string listen_service = kDefaultListenService,
+                 int poll_timeout_ms = kDefaultPollTimoutMillis,
+                 ns_rcode error_rcode = ns_rcode::ns_r_servfail);
     ~DNSResponder();
 
     enum class Edns : uint8_t {
@@ -72,6 +79,7 @@ class DNSResponder {
     void clearQueries();
     std::condition_variable& getCv() { return cv; }
     std::mutex& getCvMutex() { return cv_mutex_; }
+    void setDeferredResp(bool deferred_resp);
 
   private:
     // Key used for accessing mappings.
@@ -152,6 +160,10 @@ class DNSResponder {
     std::mutex update_mutex_;
     std::condition_variable cv;
     std::mutex cv_mutex_;
+
+    std::condition_variable cv_for_deferred_resp_;
+    std::mutex cv_mutex_for_deferred_resp_;
+    bool deferred_resp_ GUARDED_BY(cv_mutex_for_deferred_resp_) = false;
 };
 
 }  // namespace test
