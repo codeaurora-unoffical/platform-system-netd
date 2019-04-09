@@ -95,6 +95,9 @@
  * IF IBM IS APPRISED OF THE POSSIBILITY OF SUCH DAMAGES.
  */
 
+#define LOG_TAG "res_debug"
+#define DBG 0
+
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -108,7 +111,6 @@
 #include <errno.h>
 #include <math.h>
 #include <netdb.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -122,7 +124,8 @@ struct res_sym {
     const char* humanname; /* Its fun name, like "mail exchanger" */
 };
 
-/* add a formatted string to a bounded buffer */
+// add a formatted string to a bounded buffer
+// TODO: convert to std::string
 static char* dbprint(char* p, char* end, const char* format, ...) {
     int avail, n;
     va_list args;
@@ -144,8 +147,9 @@ static char* dbprint(char* p, char* end, const char* format, ...) {
 
     return p;
 }
-static void do_section(const res_state statp, ns_msg* handle, ns_sect section, int pflag) {
-    int n, sflag, rrnum;
+
+static void do_section(ns_msg* handle, ns_sect section) {
+    int n, rrnum;
     int buflen = 2048;
     ns_opcode opcode;
     ns_rr rr;
@@ -154,13 +158,11 @@ static void do_section(const res_state statp, ns_msg* handle, ns_sect section, i
     /*
      * Print answer records.
      */
-    sflag = (int) (statp->pfcode & pflag);
-    if (statp->pfcode && !sflag) return;
 
     char* buf = (char*) malloc((size_t) buflen);
     if (buf == NULL) {
         dbprint(p, end, ";; memory allocation failure\n");
-        LOG(VERBOSE) << temp;
+        LOG(VERBOSE) << __func__ << ": " << temp;
         return;
     }
 
@@ -170,12 +172,8 @@ static void do_section(const res_state statp, ns_msg* handle, ns_sect section, i
         if (ns_parserr(handle, section, rrnum, &rr)) {
             if (errno != ENODEV)
                 dbprint(p, end, ";; ns_parserr: %s", strerror(errno));
-            else if (rrnum > 0 && sflag != 0 && (statp->pfcode & RES_PRF_HEAD1))
-                dbprint(p, end, "\n");
             goto cleanup;
         }
-        if (rrnum == 0 && sflag != 0 && (statp->pfcode & RES_PRF_HEAD1))
-            dbprint(p, end, ";; %s SECTION:\n", p_section(section, opcode));
         if (section == ns_s_qd)
             dbprint(p, end, ";;\t%s, type = %s, class = %s\n", ns_rr_name(rr),
                     p_type(ns_rr_type(rr)), p_class(ns_rr_class(rr)));
@@ -237,7 +235,7 @@ static void do_section(const res_state statp, ns_msg* handle, ns_sect section, i
                     }
                     if (buf == NULL) {
                         p = dbprint(p, end, ";; memory allocation failure\n");
-                        LOG(VERBOSE) << temp;
+                        LOG(VERBOSE) << __func__ << ": " << temp;
                         return;
                     }
                     continue;
@@ -258,8 +256,9 @@ cleanup:
  * Print the contents of a query.
  * This is intended to be primarily a debugging routine.
  */
+void res_pquery(const u_char* msg, int len) {
+    if (!WOULD_LOG(VERBOSE)) return;
 
-void res_pquery(const res_state statp, const u_char* msg, int len) {
     ns_msg handle;
     int qdcount, ancount, nscount, arcount;
     u_int opcode, rcode, id;
@@ -280,86 +279,33 @@ void res_pquery(const res_state statp, const u_char* msg, int len) {
     /*
      * Print header fields.
      */
-    if ((!statp->pfcode) || (statp->pfcode & RES_PRF_HEADX) || rcode)
-        dbprint(p, end, ";; ->>HEADER<<- opcode: %s, status: %s, id: %d\n", _res_opcodes[opcode],
-                p_rcode((int)rcode), id);
-    if ((!statp->pfcode) || (statp->pfcode & RES_PRF_HEADX)) p = dbprint(p, end, ";");
-    if ((!statp->pfcode) || (statp->pfcode & RES_PRF_HEAD2)) {
-        p = dbprint(p, end, "; flags:");
-        if (ns_msg_getflag(handle, ns_f_qr)) p = dbprint(p, end, " qr");
-        if (ns_msg_getflag(handle, ns_f_aa)) p = dbprint(p, end, " aa");
-        if (ns_msg_getflag(handle, ns_f_tc)) p = dbprint(p, end, " tc");
-        if (ns_msg_getflag(handle, ns_f_rd)) p = dbprint(p, end, " rd");
-        if (ns_msg_getflag(handle, ns_f_ra)) p = dbprint(p, end, " ra");
-        if (ns_msg_getflag(handle, ns_f_z)) p = dbprint(p, end, " ??");
-        if (ns_msg_getflag(handle, ns_f_ad)) p = dbprint(p, end, " ad");
-        if (ns_msg_getflag(handle, ns_f_cd)) p = dbprint(p, end, " cd");
-    }
-    if ((!statp->pfcode) || (statp->pfcode & RES_PRF_HEAD1)) {
-        p = dbprint(p, end, "; %s: %d", p_section(ns_s_qd, (int)opcode), qdcount);
-        p = dbprint(p, end, ", %s: %d", p_section(ns_s_an, (int)opcode), ancount);
-        p = dbprint(p, end, ", %s: %d", p_section(ns_s_ns, (int)opcode), nscount);
-        p = dbprint(p, end, ", %s: %d", p_section(ns_s_ar, (int)opcode), arcount);
-    }
-    if ((!statp->pfcode) || (statp->pfcode & (RES_PRF_HEADX | RES_PRF_HEAD2 | RES_PRF_HEAD1))) {
-        p = dbprint(p, end, " \n");
-    }
+    dbprint(p, end, ";; ->>HEADER<<- opcode: %s, status: %s, id: %d\n", _res_opcodes[opcode],
+            p_rcode((int)rcode), id);
+    p = dbprint(p, end, ";");
+    p = dbprint(p, end, "; flags:");
+    if (ns_msg_getflag(handle, ns_f_qr)) p = dbprint(p, end, " qr");
+    if (ns_msg_getflag(handle, ns_f_aa)) p = dbprint(p, end, " aa");
+    if (ns_msg_getflag(handle, ns_f_tc)) p = dbprint(p, end, " tc");
+    if (ns_msg_getflag(handle, ns_f_rd)) p = dbprint(p, end, " rd");
+    if (ns_msg_getflag(handle, ns_f_ra)) p = dbprint(p, end, " ra");
+    if (ns_msg_getflag(handle, ns_f_z)) p = dbprint(p, end, " ??");
+    if (ns_msg_getflag(handle, ns_f_ad)) p = dbprint(p, end, " ad");
+    if (ns_msg_getflag(handle, ns_f_cd)) p = dbprint(p, end, " cd");
+    p = dbprint(p, end, "; %s: %d", p_section(ns_s_qd, (int)opcode), qdcount);
+    p = dbprint(p, end, ", %s: %d", p_section(ns_s_an, (int)opcode), ancount);
+    p = dbprint(p, end, ", %s: %d", p_section(ns_s_ns, (int)opcode), nscount);
+    p = dbprint(p, end, ", %s: %d", p_section(ns_s_ar, (int)opcode), arcount);
+
     LOG(VERBOSE) << temp;
 
     /*
      * Print the various sections.
      */
-    do_section(statp, &handle, ns_s_qd, RES_PRF_QUES);
-    do_section(statp, &handle, ns_s_an, RES_PRF_ANS);
-    do_section(statp, &handle, ns_s_ns, RES_PRF_AUTH);
-    do_section(statp, &handle, ns_s_ar, RES_PRF_ADD);
+    do_section(&handle, ns_s_qd);
+    do_section(&handle, ns_s_an);
+    do_section(&handle, ns_s_ns);
+    do_section(&handle, ns_s_ar);
     if (qdcount == 0 && ancount == 0 && nscount == 0 && arcount == 0) LOG(VERBOSE) << ";;";
-}
-
-const u_char* p_cdnname(const u_char* cp, const u_char* msg, int len, FILE* file) {
-    char name[MAXDNAME];
-    int n;
-
-    if ((n = dn_expand(msg, msg + len, cp, name, (int) sizeof name)) < 0) return (NULL);
-    if (name[0] == '\0')
-        putc('.', file);
-    else
-        fputs(name, file);
-    return (cp + n);
-}
-
-const u_char* p_cdname(const u_char* cp, const u_char* msg, FILE* file) {
-    return (p_cdnname(cp, msg, PACKETSZ, file));
-}
-
-/* Return a fully-qualified domain name from a compressed name (with
-   length supplied).  */
-
-const u_char* p_fqnname(const u_char* cp, const u_char* msg, int msglen, char* name, int namelen) {
-    int n;
-    size_t newlen;
-
-    if ((n = dn_expand(msg, cp + msglen, cp, name, namelen)) < 0) return (NULL);
-    newlen = strlen(name);
-    if (newlen == 0 || name[newlen - 1] != '.') {
-        if ((int) newlen + 1 >= namelen) /* Lack space for final dot */
-            return (NULL);
-        else
-            strcpy(name + newlen, ".");
-    }
-    return (cp + n);
-}
-
-/* XXX:	the rest of these functions need to become length-limited, too. */
-
-const u_char* p_fqname(const u_char* cp, const u_char* msg, FILE* file) {
-    char name[MAXDNAME];
-    const u_char* n;
-
-    n = p_fqnname(cp, msg, MAXCDNAME, name, (int) sizeof name);
-    if (n == NULL) return (NULL);
-    fputs(name, file);
-    return (n);
 }
 
 /*
@@ -554,24 +500,23 @@ const char* p_rcode(int rcode) {
 
 android::base::LogSeverity logSeverityStrToEnum(const std::string& logSeverityStr) {
     android::base::LogSeverity logSeverityEnum;
-    if (logSeverityStr == "VERBOSE") {
-        logSeverityEnum = android::base::VERBOSE;
-    } else if (logSeverityStr == "DEBUG") {
-        logSeverityEnum = android::base::DEBUG;
+
+    if (logSeverityStr == "DEBUG") {
+        // *** enable verbose logging only when DBG is set. It prints sensitive data ***
+        if (DBG)
+            logSeverityEnum = android::base::VERBOSE;
+        else
+            logSeverityEnum = android::base::DEBUG;
     } else if (logSeverityStr == "INFO") {
         logSeverityEnum = android::base::INFO;
     } else if (logSeverityStr == "WARNING") {
         logSeverityEnum = android::base::WARNING;
     } else if (logSeverityStr == "ERROR") {
         logSeverityEnum = android::base::ERROR;
-    } else if (logSeverityStr == "FATAL_WITHOUT_ABORT") {
-        logSeverityEnum = android::base::FATAL_WITHOUT_ABORT;
-    } else if (logSeverityStr == "FATAL") {
-        logSeverityEnum = android::base::FATAL;
     } else {
         // Invalid parameter is treated as WARNING (default setting)
         logSeverityEnum = android::base::WARNING;
     }
-    LOG(INFO) << "logSeverityEnum " << logSeverityEnum;
+    LOG(INFO) << __func__ << ": " << logSeverityEnum;
     return logSeverityEnum;
 }

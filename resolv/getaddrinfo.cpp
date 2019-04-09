@@ -30,6 +30,8 @@
  * SUCH DAMAGE.
  */
 
+#define LOG_TAG "getaddrinfo"
+
 #include <arpa/inet.h>
 #include <arpa/nameser.h>
 #include <assert.h>
@@ -231,7 +233,7 @@ static int str2number(const char* p) {
  * on the local system". However, bionic doesn't currently support getifaddrs,
  * so checking for connectivity is the next best thing.
  */
-static int _have_ipv6(unsigned mark, uid_t uid) {
+static int have_ipv6(unsigned mark, uid_t uid) {
     static const struct sockaddr_in6 sin6_test = {
             .sin6_family = AF_INET6,
             .sin6_addr.s6_addr = {// 2000::
@@ -240,7 +242,7 @@ static int _have_ipv6(unsigned mark, uid_t uid) {
     return _find_src_addr(&addr.sa, NULL, mark, uid) == 1;
 }
 
-static int _have_ipv4(unsigned mark, uid_t uid) {
+static int have_ipv4(unsigned mark, uid_t uid) {
     static const struct sockaddr_in sin_test = {
             .sin_family = AF_INET,
             .sin_addr.s_addr = __constant_htonl(0x08080808L)  // 8.8.8.8
@@ -359,6 +361,8 @@ int android_getaddrinfofornetcontext(const char* hostname, const char* servname,
             if (tmp.ai_socktype == ANY && ex.e_socktype != ANY) tmp.ai_socktype = ex.e_socktype;
             if (tmp.ai_protocol == ANY && ex.e_protocol != ANY) tmp.ai_protocol = ex.e_protocol;
 
+            LOG(DEBUG) << __func__ << ": explore_numeric: ai_family=" << tmp.ai_family
+                       << " ai_socktype=" << tmp.ai_socktype << " ai_protocol=" << tmp.ai_protocol;
             if (hostname == nullptr)
                 error = explore_null(&tmp, servname, &cur->ai_next);
             else
@@ -405,6 +409,8 @@ int android_getaddrinfofornetcontext(const char* hostname, const char* servname,
             if (tmp.ai_socktype == ANY && ex.e_socktype != ANY) tmp.ai_socktype = ex.e_socktype;
             if (tmp.ai_protocol == ANY && ex.e_protocol != ANY) tmp.ai_protocol = ex.e_protocol;
 
+            LOG(DEBUG) << __func__ << ": explore_fqdn(): ai_family=" << tmp.ai_family
+                       << " ai_socktype=" << tmp.ai_socktype << " ai_protocol=" << tmp.ai_protocol;
             error = explore_fqdn(&tmp, hostname, servname, &cur->ai_next, netcontext);
 
             while (cur->ai_next) cur = cur->ai_next;
@@ -419,7 +425,7 @@ int android_getaddrinfofornetcontext(const char* hostname, const char* servname,
 
     if (error) {
         freeaddrinfo(sentinel.ai_next);
-        *res = NULL;
+        *res = nullptr;
     } else {
         *res = sentinel.ai_next;
     }
@@ -471,6 +477,8 @@ static int explore_null(const struct addrinfo* pai, const char* servname, struct
     struct addrinfo* cur;
     struct addrinfo sentinel;
     int error;
+
+    LOG(DEBUG) << __func__;
 
     assert(pai != NULL);
     /* servname may be NULL */
@@ -582,6 +590,8 @@ static int explore_numeric_scope(const struct addrinfo* pai, const char* hostnam
     int error;
     const char *cp, *scope, *addr;
     struct sockaddr_in6* sin6;
+
+    LOG(DEBUG) << __func__;
 
     assert(pai != NULL);
     /* hostname may be NULL */
@@ -930,9 +940,8 @@ static struct addrinfo* getanswer(const querybuf* answer, int anslen, const char
             }
         } else if (type != qtype) {
             if (type != T_KEY && type != T_SIG)
-                LOG(DEBUG) << __func__ << "(getanswer): asked for \"" << qname << " "
-                           << p_class(C_IN) << " " << p_type(qtype) << "\", got type \""
-                           << p_type(type) << "\"";
+                LOG(DEBUG) << __func__ << ": asked for \"" << qname << " " << p_class(C_IN) << " "
+                           << p_type(qtype) << "\", got type \"" << p_type(type) << "\"";
             cp += n;
             continue; /* XXX - had_error++ ? */
         }
@@ -940,8 +949,8 @@ static struct addrinfo* getanswer(const querybuf* answer, int anslen, const char
             case T_A:
             case T_AAAA:
                 if (strcasecmp(canonname, bp) != 0) {
-                    LOG(DEBUG) << __func__ << "(getanswer): asked for \"" << canonname
-                               << "\", got \"" << bp << "\"";
+                    LOG(DEBUG) << __func__ << ": asked for \"" << canonname << "\", got \"" << bp
+                               << "\"";
                     cp += n;
                     continue; /* XXX - had_error++ ? */
                 }
@@ -1369,24 +1378,11 @@ error:
 
 static int dns_getaddrinfo(const char* name, const addrinfo* pai,
                            const android_net_context* netcontext, addrinfo** rv) {
-    struct addrinfo *ai, *cur;
-    struct addrinfo sentinel = {};
-    struct res_target q, q2;
-    res_state res;
+    res_target q = {};
+    res_target q2 = {};
 
-    memset(&q, 0, sizeof(q));
-    memset(&q2, 0, sizeof(q2));
-    cur = &sentinel;
-
-    querybuf* buf = (querybuf*) malloc(sizeof(*buf));
-    if (buf == NULL) {
-        return EAI_MEMORY;
-    }
-    querybuf* buf2 = (querybuf*) malloc(sizeof(*buf2));
-    if (buf2 == NULL) {
-        free(buf);
-        return EAI_MEMORY;
-    }
+    auto buf = std::make_unique<querybuf>();
+    auto buf2 = std::make_unique<querybuf>();
 
     switch (pai->ai_family) {
         case AF_UNSPEC: {
@@ -1397,8 +1393,8 @@ static int dns_getaddrinfo(const char* name, const addrinfo* pai,
             q.anslen = sizeof(buf->buf);
             int query_ipv6 = 1, query_ipv4 = 1;
             if (pai->ai_flags & AI_ADDRCONFIG) {
-                query_ipv6 = _have_ipv6(netcontext->app_mark, netcontext->uid);
-                query_ipv4 = _have_ipv4(netcontext->app_mark, netcontext->uid);
+                query_ipv6 = have_ipv6(netcontext->app_mark, netcontext->uid);
+                query_ipv4 = have_ipv4(netcontext->app_mark, netcontext->uid);
             }
             if (query_ipv6) {
                 q.qtype = T_AAAA;
@@ -1413,8 +1409,6 @@ static int dns_getaddrinfo(const char* name, const addrinfo* pai,
             } else if (query_ipv4) {
                 q.qtype = T_A;
             } else {
-                free(buf);
-                free(buf2);
                 return EAI_NODATA;
             }
             break;
@@ -1434,17 +1428,11 @@ static int dns_getaddrinfo(const char* name, const addrinfo* pai,
             q.anslen = sizeof(buf->buf);
             break;
         default:
-            free(buf);
-            free(buf2);
             return EAI_FAMILY;
     }
 
-    res = res_get_state();
-    if (res == NULL) {
-        free(buf);
-        free(buf2);
-        return EAI_MEMORY;
-    }
+    res_state res = res_get_state();
+    if (!res) return EAI_MEMORY;
 
     /* this just sets our netid val in the thread private data so we don't have to
      * modify the api's all the way down to res_send.c's res_nsend.  We could
@@ -1455,22 +1443,21 @@ static int dns_getaddrinfo(const char* name, const addrinfo* pai,
 
     int herrno = NETDB_INTERNAL;
     if (res_searchN(name, &q, res, &herrno) < 0) {
-        free(buf);
-        free(buf2);
         // Pass herrno to catch more detailed errors rather than EAI_NODATA.
         return herrnoToAiErrno(herrno);
     }
-    ai = getanswer(buf, q.n, q.name, q.qtype, pai, &herrno);
+
+    addrinfo sentinel = {};
+    addrinfo* cur = &sentinel;
+    addrinfo* ai = getanswer(buf.get(), q.n, q.name, q.qtype, pai, &herrno);
     if (ai) {
         cur->ai_next = ai;
         while (cur && cur->ai_next) cur = cur->ai_next;
     }
     if (q.next) {
-        ai = getanswer(buf2, q2.n, q2.name, q2.qtype, pai, &herrno);
+        ai = getanswer(buf2.get(), q2.n, q2.name, q2.qtype, pai, &herrno);
         if (ai) cur->ai_next = ai;
     }
-    free(buf);
-    free(buf2);
     if (sentinel.ai_next == NULL) {
         return herrnoToAiErrno(herrno);
     }
@@ -1525,7 +1512,6 @@ again:
         if (!cname) cname = cp;
         tname = cp;
         if ((cp = strpbrk(cp, " \t")) != NULL) *cp++ = '\0';
-        //		fprintf(stderr, "\ttname = '%s'", tname);
         if (strcasecmp(name, tname) == 0) goto found;
     }
     goto again;
@@ -1606,13 +1592,13 @@ static int res_queryN(const char* name, res_target* target, res_state res, int* 
         answer = t->answer;
         anslen = t->anslen;
 
-        LOG(DEBUG) << ";; res_queryN(" << name << ", " << cl << " , " << type << ")";
+        LOG(DEBUG) << __func__ << ": (" << cl << ", " << type << ")";
 
         n = res_nmkquery(res, QUERY, name, cl, type, NULL, 0, NULL, buf, sizeof(buf));
         if (n > 0 && (res->options & (RES_USE_EDNS0 | RES_USE_DNSSEC)) != 0 && !retried)
             n = res_nopt(res, n, buf, sizeof(buf), anslen);
         if (n <= 0) {
-            LOG(DEBUG) << ";; res_queryN: mkquery failed";
+            LOG(ERROR) << __func__ << ": res_nmkquery failed";
             *herrno = NO_RECOVERY;
             return n;
         }
@@ -1625,11 +1611,11 @@ static int res_queryN(const char* name, res_target* target, res_state res, int* 
             /* if the query choked with EDNS0, retry without EDNS0 */
             if ((res->options & (RES_USE_EDNS0 | RES_USE_DNSSEC)) != 0 &&
                 (res->_flags & RES_F_EDNS0ERR) && !retried) {
-                LOG(DEBUG) << ";; res_queryN: retry without EDNS0";
+                LOG(DEBUG) << __func__ << ": retry without EDNS0";
                 retried = true;
                 goto again;
             }
-            LOG(DEBUG) << ";; rcode = " << hp->rcode << ", ancount=" << ntohs(hp->ancount);
+            LOG(DEBUG) << __func__ << ": rcode=" << hp->rcode << ", ancount=" << ntohs(hp->ancount);
             continue;
         }
 
@@ -1806,13 +1792,9 @@ static int res_querydomainN(const char* name, const char* domain, res_target* ta
     size_t n, d;
 
     assert(name != NULL);
-    /* XXX: target may be NULL??? */
+
     if (domain == NULL) {
-        LOG(DEBUG) << ";; res_querydomain(" << name << ", <Nil>)";
-        /*
-         * Check for trailing '.';
-         * copy without '.' if present.
-         */
+        // Check for trailing '.'; copy without '.' if present.
         n = strlen(name);
         if (n + 1 > sizeof(nbuf)) {
             *herrno = NO_RECOVERY;
@@ -1824,7 +1806,6 @@ static int res_querydomainN(const char* name, const char* domain, res_target* ta
         } else
             longname = name;
     } else {
-        LOG(DEBUG) << ";; res_querydomain(" << name << ", " << domain << ")";
         n = strlen(name);
         d = strlen(domain);
         if (n + 1 + d + 1 > sizeof(nbuf)) {

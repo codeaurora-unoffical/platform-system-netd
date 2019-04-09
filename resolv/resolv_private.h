@@ -78,11 +78,9 @@
 #define MAXDFLSRCH 3       /* # default domain levels to try */
 #define LOCALDOMAINPARTS 2 /* min levels in name that is "local" */
 
-#define RES_TIMEOUT 5     /* min. seconds between retries */
+#define RES_TIMEOUT 5000 /* min. milliseconds between retries */
 #define MAXRESOLVSORT 10  /* number of net to sort on */
 #define RES_MAXNDOTS 15   /* should reflect bit field size */
-#define RES_MAXRETRANS 30 /* only for resolv.conf/RES_OPTIONS */
-#define RES_MAXRETRY 5    /* only for resolv.conf/RES_OPTIONS */
 #define RES_DFLRETRY 2    /* Default #/tries. */
 #define RES_MAXTIME 65535 /* Infinity, in milliseconds. */
 
@@ -90,8 +88,6 @@ struct res_state_ext;
 
 struct __res_state {
     unsigned netid;                        /* NetId: cache key and socket mark */
-    int retrans;                           /* retransmission time interval */
-    int retry;                             /* number of times to retransmit */
     u_long options;                        /* option flags - see below. */
     int nscount;                           /* number of name srvers */
     struct sockaddr_in nsaddr_list[MAXNS]; /* address of name server */
@@ -99,7 +95,6 @@ struct __res_state {
     u_short id;                            /* current message id */
     char* dnsrch[MAXDNSRCH + 1];           /* components of domain to search */
     char defdname[256];                    /* default domain (deprecated) */
-    u_long pfcode;                         /* RES_PRF_ flags - see below. */
     unsigned ndots : 4;                    /* threshold for initial abs. query */
     unsigned nsort : 4;                    /* number of elements in sort_list[] */
     char unused[3];
@@ -180,26 +175,6 @@ void _res_stats_set_sample(res_sample* sample, time_t now, int rcode, int rtt);
 
 #define RES_DEFAULT (RES_RECURSE | RES_DEFNAMES | RES_DNSRCH | RES_NO_NIBBLE2)
 
-/*
- * Resolver "pfcode" values.  Used by dig.
- */
-#define RES_PRF_STATS 0x00000001
-#define RES_PRF_UPDATE 0x00000002
-#define RES_PRF_CLASS 0x00000004
-#define RES_PRF_CMD 0x00000008
-#define RES_PRF_QUES 0x00000010
-#define RES_PRF_ANS 0x00000020
-#define RES_PRF_AUTH 0x00000040
-#define RES_PRF_ADD 0x00000080
-#define RES_PRF_HEAD1 0x00000100
-#define RES_PRF_HEAD2 0x00000200
-#define RES_PRF_TTLID 0x00000400
-#define RES_PRF_HEADX 0x00000800
-#define RES_PRF_QUERY 0x00001000
-#define RES_PRF_REPLY 0x00002000
-#define RES_PRF_INIT 0x00004000
-#define RES_PRF_TRUNC 0x00008000
-/*			0x00010000	*/
 
 /*
  * Error code extending h_errno codes defined in bionic/libc/include/netdb.h.
@@ -223,19 +198,19 @@ int res_dnok(const char*);
 int dn_skipname(const u_char*, const u_char*);
 void putlong(uint32_t, u_char*);
 void putshort(uint16_t, u_char*);
+
+// Thread-unsafe functions returning pointers to static buffers :-(
+// TODO: switch all res_debug to std::string
 const char* p_class(int);
 const char* p_type(int);
 const char* p_rcode(int);
-const u_char* p_cdnname(const u_char*, const u_char*, int, FILE*);
-const u_char* p_cdname(const u_char*, const u_char*, FILE*);
-const u_char* p_fqnname(const u_char*, const u_char*, int, char*, int);
-const u_char* p_fqname(const u_char*, const u_char*, FILE*);
+const char* p_section(int, int);
+
 int res_nameinquery(const char*, int, int, const u_char*, const u_char*);
 int res_queriesmatch(const u_char*, const u_char*, const u_char*, const u_char*);
-const char* p_section(int, int);
 /* Things involving a resolver context. */
 int res_ninit(res_state);
-void res_pquery(const res_state, const u_char*, int);
+void res_pquery(const u_char*, int);
 
 int res_nquery(res_state, const char*, int, int, u_char*, int, int*);
 int res_nsearch(res_state, const char*, int, int, u_char*, int, int*);

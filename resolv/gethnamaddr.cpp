@@ -113,9 +113,9 @@ static void map_v4v6_hostent(struct hostent*, char**, char*);
 static void pad_v4v6_hostent(struct hostent* hp, char** bpp, char* ep);
 static void addrsort(char**, int, res_state);
 
-static int _dns_gethtbyaddr(const unsigned char* uaddr, int len, int af,
-                            const android_net_context* netcontext, getnamaddr* info);
-static int _dns_gethtbyname(const char* name, int af, getnamaddr* info);
+static int dns_gethtbyaddr(const unsigned char* uaddr, int len, int af,
+                           const android_net_context* netcontext, getnamaddr* info);
+static int dns_gethtbyname(const char* name, int af, getnamaddr* info);
 
 static int gethostbyname_internal(const char* name, int af, res_state res, hostent* hp, char* hbuf,
                                   size_t hbuflen, const android_net_context* netcontext);
@@ -277,17 +277,16 @@ static struct hostent* getanswer(const querybuf* answer, int anslen, const char*
         }
         if (type != qtype) {
             if (type != T_KEY && type != T_SIG)
-                LOG(DEBUG) << __func__ << "(getanswer): asked for \"" << qname << " "
-                           << p_class(C_IN) << " " << p_type(qtype) << "\", got type \""
-                           << p_type(type) << "\"";
+                LOG(DEBUG) << __func__ << ": asked for \"" << qname << " " << p_class(C_IN) << " "
+                           << p_type(qtype) << "\", got type \"" << p_type(type) << "\"";
             cp += n;
             continue; /* XXX - had_error++ ? */
         }
         switch (type) {
             case T_PTR:
                 if (strcasecmp(tname, bp) != 0) {
-                    LOG(DEBUG) << __func__ << "(getanswer): asked for \"" << qname << "\", got \""
-                               << bp << "\"";
+                    LOG(DEBUG) << __func__ << ": asked for \"" << qname << "\", got \"" << bp
+                               << "\"";
                     cp += n;
                     continue; /* XXX - had_error++ ? */
                 }
@@ -314,8 +313,8 @@ static struct hostent* getanswer(const querybuf* answer, int anslen, const char*
             case T_A:
             case T_AAAA:
                 if (strcasecmp(hent->h_name, bp) != 0) {
-                    LOG(DEBUG) << __func__ << "(getanswer): asked for \"" << hent->h_name
-                               << "\", got \"" << bp << "\"";
+                    LOG(DEBUG) << __func__ << ": asked for \"" << hent->h_name << "\", got \"" << bp
+                               << "\"";
                     cp += n;
                     continue; /* XXX - had_error++ ? */
                 }
@@ -342,13 +341,13 @@ static struct hostent* getanswer(const querybuf* answer, int anslen, const char*
                 bp += sizeof(align) - (size_t)((u_long) bp % sizeof(align));
 
                 if (bp + n >= ep) {
-                    LOG(DEBUG) << "size (" << n << ") too big";
+                    LOG(DEBUG) << __func__ << ": size (" << n << ") too big";
                     had_error++;
                     continue;
                 }
                 if (hap >= &addr_ptrs[MAXADDRS - 1]) {
                     if (!toobig++) {
-                        LOG(DEBUG) << "Too many addresses (" << MAXADDRS << ")";
+                        LOG(DEBUG) << __func__ << ": Too many addresses (" << MAXADDRS << ")";
                     }
                     cp += n;
                     continue;
@@ -467,7 +466,7 @@ static int gethostbyname_internal_real(const char* name, int af, res_state res, 
     info.buf = buf;
     info.buflen = buflen;
     if (_hf_gethtbyname2(name, af, &info)) {
-        int error = _dns_gethtbyname(name, af, &info);
+        int error = dns_gethtbyname(name, af, &info);
         if (error != 0) {
             return error;
         }
@@ -545,7 +544,7 @@ static int android_gethostbyaddrfornetcontext_real(const void* addr, socklen_t l
     info.buf = buf;
     info.buflen = buflen;
     if (_hf_gethtbyaddr(uaddr, len, af, &info)) {
-        int error = _dns_gethtbyaddr(uaddr, len, af, netcontext, &info);
+        int error = dns_gethtbyaddr(uaddr, len, af, netcontext, &info);
         if (error != 0) {
             return error;
         }
@@ -760,11 +759,8 @@ static void addrsort(char** ap, int num, res_state res) {
     }
 }
 
-static int _dns_gethtbyname(const char* name, int addr_type, getnamaddr* info) {
+static int dns_gethtbyname(const char* name, int addr_type, getnamaddr* info) {
     int n, type;
-    struct hostent* hp;
-    res_state res;
-
     info->hp->h_addrtype = addr_type;
 
     switch (info->hp->h_addrtype) {
@@ -779,39 +775,31 @@ static int _dns_gethtbyname(const char* name, int addr_type, getnamaddr* info) {
         default:
             return EAI_FAMILY;
     }
-    querybuf* buf = (querybuf*) malloc(sizeof(querybuf));
-    if (buf == NULL) {
-        return EAI_MEMORY;
-    }
-    res = res_get_state();
-    if (res == NULL) {
-        free(buf);
-        return EAI_MEMORY;
-    }
+    auto buf = std::make_unique<querybuf>();
+
+    res_state res = res_get_state();
+    if (!res) return EAI_MEMORY;
 
     int herrno = NETDB_INTERNAL;
     n = res_nsearch(res, name, C_IN, type, buf->buf, (int) sizeof(buf->buf), &herrno);
     if (n < 0) {
-        free(buf);
-        LOG(DEBUG) << "res_nsearch failed (" << n << ")";
+        LOG(DEBUG) << __func__ << ": res_nsearch failed (" << n << ")";
         // Pass herrno to catch more detailed errors rather than EAI_NODATA.
         return herrnoToAiErrno(herrno);
     }
-    hp = getanswer(buf, n, name, type, res, info->hp, info->buf, info->buflen, &herrno);
-    free(buf);
+    hostent* hp =
+            getanswer(buf.get(), n, name, type, res, info->hp, info->buf, info->buflen, &herrno);
     if (hp == NULL) {
         return herrnoToAiErrno(herrno);
     }
     return 0;
 }
 
-static int _dns_gethtbyaddr(const unsigned char* uaddr, int len, int af,
-                            const android_net_context* netcontext, getnamaddr* info) {
+static int dns_gethtbyaddr(const unsigned char* uaddr, int len, int af,
+                           const android_net_context* netcontext, getnamaddr* info) {
     char qbuf[MAXDNAME + 1], *qp, *ep;
     int n;
-    struct hostent* hp;
     int advance;
-    res_state res;
 
     info->hp->h_length = len;
     info->hp->h_addrtype = af;
@@ -844,25 +832,20 @@ static int _dns_gethtbyaddr(const unsigned char* uaddr, int len, int af,
             return EAI_FAMILY;
     }
 
-    querybuf* buf = (querybuf*) malloc(sizeof(querybuf));
-    if (buf == NULL) {
-        return EAI_MEMORY;
-    }
-    res = res_get_state();
-    if (res == NULL) {
-        free(buf);
-        return EAI_MEMORY;
-    }
+    auto buf = std::make_unique<querybuf>();
+
+    res_state res = res_get_state();
+    if (!res) return EAI_MEMORY;
+
     res_setnetcontext(res, netcontext);
     int herrno = NETDB_INTERNAL;
     n = res_nquery(res, qbuf, C_IN, T_PTR, buf->buf, (int) sizeof(buf->buf), &herrno);
     if (n < 0) {
-        free(buf);
-        LOG(DEBUG) << "res_nquery failed (" << n << ")";
+        LOG(DEBUG) << __func__ << ": res_nquery failed (" << n << ")";
         return herrnoToAiErrno(herrno);
     }
-    hp = getanswer(buf, n, qbuf, T_PTR, res, info->hp, info->buf, info->buflen, &herrno);
-    free(buf);
+    hostent* hp =
+            getanswer(buf.get(), n, qbuf, T_PTR, res, info->hp, info->buf, info->buflen, &herrno);
     if (hp == NULL) {
         return herrnoToAiErrno(herrno);
     }
