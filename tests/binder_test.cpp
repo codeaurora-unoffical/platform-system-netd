@@ -1282,18 +1282,37 @@ TEST_F(BinderTest, StrictSetUidCleartextPenalty) {
 
 namespace {
 
-std::vector<std::string> findProcesses(const std::string& processName) {
-    // Output looks like:
+std::vector<std::string> tryToFindProcesses(const std::string& processName, uint32_t maxTries = 1,
+                                            uint32_t intervalMs = 50) {
+    // Output looks like:(clatd)
     // clat          4963   850 1 12:16:51 ?     00:00:00 clatd-netd10a88 -i netd10a88 ...
     // ...
     // root          5221  5219 0 12:18:12 ?     00:00:00 sh -c ps -Af | grep ' clatd-netdcc1a0'
 
+    // (dnsmasq)
+    // dns_tether    4620   792 0 16:51:28 ?     00:00:00 dnsmasq --keep-in-foreground ...
+
+    if (maxTries == 0) return {};
+
     std::string cmd = StringPrintf("ps -Af | grep '[0-9] %s'", processName.c_str());
-    return runCommand(cmd.c_str());
+    std::vector<std::string> result;
+    for (uint32_t run = 1;;) {
+        result = runCommand(cmd.c_str());
+        if (result.size() || ++run > maxTries) {
+            break;
+        }
+
+        usleep(intervalMs * 1000);
+    }
+    return result;
 }
 
-bool processExists(const std::string& processName) {
-    return (findProcesses(processName).size()) ? true : false;
+void expectProcessExists(const std::string& processName) {
+    EXPECT_EQ(1U, tryToFindProcesses(processName, 5 /*maxTries*/).size());
+}
+
+void expectProcessDoesNotExist(const std::string& processName) {
+    EXPECT_FALSE(tryToFindProcesses(processName).size());
 }
 
 }  // namespace
@@ -1346,19 +1365,18 @@ TEST_F(BinderTest, ClatdStartStop) {
     EXPECT_FALSE(status.isOk());
     EXPECT_EQ(EBUSY, status.serviceSpecificErrorCode());
 
-    std::vector<std::string> processes = findProcesses(clatdName);
-    EXPECT_EQ(1U, processes.size());
+    expectProcessExists(clatdName);
 
     // Expect clatd to stop successfully.
     status = mNetd->clatdStop(sTun.name());
     EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    EXPECT_FALSE(processExists(clatdName));
+    expectProcessDoesNotExist(clatdName);
 
     // Stopping a clatd that doesn't exist returns ENODEV.
     status = mNetd->clatdStop(sTun.name());
     EXPECT_FALSE(status.isOk());
     EXPECT_EQ(ENODEV, status.serviceSpecificErrorCode());
-    EXPECT_FALSE(processExists(clatdName));
+    expectProcessDoesNotExist(clatdName);
 
     // Clean up.
     EXPECT_TRUE(mNetd->networkRemoveRoute(TEST_NETID1, sTun.name(), "::/0", "").isOk());
@@ -1420,25 +1438,56 @@ void expectIpfwdRuleNotExists(const char* fromIf, const char* toIf) {
 }  // namespace
 
 TEST_F(BinderTest, TestIpfwdEnableDisableStatusForwarding) {
-    // Netd default enable Ipfwd with requester NetdHwService
-    const std::string defaultRequester = "NetdHwService";
-
-    binder::Status status = mNetd->ipfwdDisableForwarding(defaultRequester);
+    // Get ipfwd requester list from Netd
+    std::vector<std::string> requesterList;
+    binder::Status status = mNetd->ipfwdGetRequesterList(&requesterList);
     EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    expectIpfwdEnable(false);
 
     bool ipfwdEnabled;
-    status = mNetd->ipfwdEnabled(&ipfwdEnabled);
-    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    EXPECT_FALSE(ipfwdEnabled);
+    if (requesterList.size() == 0) {
+        // No requester in Netd, ipfwd should be disabled
+        // So add one test requester and verify
+        status = mNetd->ipfwdEnableForwarding("TestRequester");
+        EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
 
-    status = mNetd->ipfwdEnableForwarding(defaultRequester);
-    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    expectIpfwdEnable(true);
+        expectIpfwdEnable(true);
+        status = mNetd->ipfwdEnabled(&ipfwdEnabled);
+        EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+        EXPECT_TRUE(ipfwdEnabled);
 
-    status = mNetd->ipfwdEnabled(&ipfwdEnabled);
-    EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    EXPECT_TRUE(ipfwdEnabled);
+        // Remove test one, verify again
+        status = mNetd->ipfwdDisableForwarding("TestRequester");
+        EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+
+        expectIpfwdEnable(false);
+        status = mNetd->ipfwdEnabled(&ipfwdEnabled);
+        EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+        EXPECT_FALSE(ipfwdEnabled);
+    } else {
+        // Disable all requesters
+        for (const auto& requester : requesterList) {
+            status = mNetd->ipfwdDisableForwarding(requester);
+            EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+        }
+
+        // After disable all requester, ipfwd should be disabled
+        expectIpfwdEnable(false);
+        status = mNetd->ipfwdEnabled(&ipfwdEnabled);
+        EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+        EXPECT_FALSE(ipfwdEnabled);
+
+        // Enable them back
+        for (const auto& requester : requesterList) {
+            status = mNetd->ipfwdEnableForwarding(requester);
+            EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+        }
+
+        // ipfwd should be enabled
+        expectIpfwdEnable(true);
+        status = mNetd->ipfwdEnabled(&ipfwdEnabled);
+        EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
+        EXPECT_TRUE(ipfwdEnabled);
+    }
 }
 
 TEST_F(BinderTest, TestIpfwdAddRemoveInterfaceForward) {
@@ -2061,7 +2110,7 @@ TEST_F(BinderTest, TetherStartStopStatus) {
 
     binder::Status status = mNetd->tetherStart(noDhcpRange);
     EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    EXPECT_TRUE(processExists(dnsdName));
+    expectProcessExists(dnsdName);
 
     bool tetherEnabled;
     status = mNetd->tetherIsEnabled(&tetherEnabled);
@@ -2070,7 +2119,7 @@ TEST_F(BinderTest, TetherStartStopStatus) {
 
     status = mNetd->tetherStop();
     EXPECT_TRUE(status.isOk()) << status.exceptionMessage();
-    EXPECT_FALSE(processExists(dnsdName));
+    expectProcessDoesNotExist(dnsdName);
 
     status = mNetd->tetherIsEnabled(&tetherEnabled);
     EXPECT_TRUE(status.isOk()) << status.exceptionMessage();

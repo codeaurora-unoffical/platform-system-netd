@@ -39,7 +39,6 @@
 #include <android/net/metrics/INetdEventListener.h>
 
 #include "Controllers.h"
-#include "DumpWriter.h"
 #include "EventReporter.h"
 #include "Fwmark.h"
 #include "NetdConstants.h"
@@ -50,8 +49,12 @@
 #include "netd_resolv/resolv.h"
 #include "netd_resolv/resolv_stub.h"
 #include "netd_resolv/stats.h"
+#include "netdutils/DumpWriter.h"
 
 namespace android {
+
+using netdutils::DumpWriter;
+
 namespace net {
 
 namespace {
@@ -349,7 +352,7 @@ void ResolverController::sendNat64PrefixEvent(const Dns64Configuration::Nat64Pre
 }
 
 bool ResolverController::initResolver() {
-    dnsproxylistener_callbacks callbacks = {
+    ResolverNetdCallbacks callbacks = {
             .get_network_context = &getNetworkContextCallback,
             .get_dns64_prefix = &getDns64PrefixCallback,
             .check_calling_permission = &checkCallingPermissionCallback,
@@ -405,10 +408,10 @@ void ResolverController::dump(DumpWriter& dw, unsigned netId) {
         if (params.sample_validity != 0) {
             dw.println(
                     "DNS parameters: sample validity = %us, success threshold = %u%%, "
-                    "samples (min, max) = (%u, %u), base_timeout = %dmsec",
-                    params.sample_validity, static_cast<unsigned>(params.success_threshold),
-                    static_cast<unsigned>(params.min_samples),
-                    static_cast<unsigned>(params.max_samples), params.base_timeout_msec);
+                    "samples (min, max) = (%u, %u), base_timeout = %dmsec, retry count = "
+                    "%dtimes",
+                    params.sample_validity, params.success_threshold, params.min_samples,
+                    params.max_samples, params.base_timeout_msec, params.retry_count);
         }
 
         mDns64Configuration.dump(dw, netId);

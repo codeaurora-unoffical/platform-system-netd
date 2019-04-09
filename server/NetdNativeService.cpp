@@ -34,10 +34,10 @@
 #include <binder/IServiceManager.h>
 
 #include <json/value.h>
+#include <json/writer.h>
 #include <openssl/base64.h>
 
 #include "Controllers.h"
-#include "DumpWriter.h"
 #include "InterfaceController.h"
 #include "NetdConstants.h"  // SHA256_SIZE
 #include "NetdNativeService.h"
@@ -48,12 +48,15 @@
 #include "SockDiag.h"
 #include "UidRanges.h"
 #include "android/net/BnNetd.h"
+#include "netdutils/DumpWriter.h"
 #include "netid_client.h"  // NETID_UNSET
 
 using android::base::StringPrintf;
 using android::base::WriteStringToFile;
 using android::net::TetherStatsParcel;
 using android::net::UidRangeParcel;
+using android::netdutils::DumpWriter;
+using android::netdutils::ScopedIndent;
 using android::os::ParcelFileDescriptor;
 
 namespace android {
@@ -168,8 +171,10 @@ status_t NetdNativeService::start() {
         output.append(logTransaction["method_name"].asString().c_str() + std::string("("));
 
         // input args
+        Json::FastWriter fastWriter;
+        fastWriter.omitEndingLineFeed();
         for (Json::Value::Members::iterator iter = member.begin(); iter != member.end(); ++iter) {
-            std::string value = inputArgs[(*iter).c_str()].asString();
+            std::string value = fastWriter.write(inputArgs[(*iter).c_str()]);
             if (value.empty()) value = std::string("null");
             output.append(value);
             if (iter != member.end() - 1) {
@@ -179,7 +184,7 @@ status_t NetdNativeService::start() {
         output.append(std::string(")"));
         // return args
         if (hasReturnArgs) {
-            output.append(StringPrintf(" -> (%s)", returnArgs.asString().c_str()));
+            output.append(StringPrintf(" -> (%s)", fastWriter.write(returnArgs).c_str()));
         }
         // duration time
         output.append(StringPrintf(" <%sms>", logTransaction["duration_ms"].asString().c_str()));
@@ -884,7 +889,15 @@ binder::Status NetdNativeService::clatdStop(const std::string& ifName) {
 
 binder::Status NetdNativeService::ipfwdEnabled(bool* status) {
     NETD_LOCKING_RPC(gCtls->tetherCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
-    *status = (gCtls->tetherCtrl.forwardingRequestCount() > 0) ? true : false;
+    *status = (gCtls->tetherCtrl.getIpfwdRequesterList().size() > 0) ? true : false;
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::ipfwdGetRequesterList(std::vector<std::string>* requesterList) {
+    NETD_LOCKING_RPC(gCtls->tetherCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
+    for (const auto& requester : gCtls->tetherCtrl.getIpfwdRequesterList()) {
+        requesterList->push_back(requester);
+    }
     return binder::Status::ok();
 }
 
