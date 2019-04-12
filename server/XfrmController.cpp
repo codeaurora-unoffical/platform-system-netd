@@ -54,23 +54,24 @@
 #include <log/log.h>
 #include <log/log_properties.h>
 #include <logwrap/logwrap.h>
-#include "DumpWriter.h"
 #include "Fwmark.h"
 #include "InterfaceController.h"
 #include "NetdConstants.h"
 #include "NetlinkCommands.h"
 #include "Permission.h"
-#include "ResponseCode.h"
 #include "XfrmController.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 #include "android-base/unique_fd.h"
+#include "netdutils/DumpWriter.h"
 #include "netdutils/Fd.h"
 #include "netdutils/Slice.h"
 #include "netdutils/Syscalls.h"
 
 using android::net::INetd;
+using android::netdutils::DumpWriter;
 using android::netdutils::Fd;
+using android::netdutils::ScopedIndent;
 using android::netdutils::Slice;
 using android::netdutils::Status;
 using android::netdutils::StatusOr;

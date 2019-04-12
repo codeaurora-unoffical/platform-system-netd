@@ -15,7 +15,7 @@
  *
  */
 
-#define LOG_TAG "netd_test"
+#define LOG_TAG "resolv_integration_test"
 
 #include <arpa/inet.h>
 #include <arpa/nameser.h>
@@ -39,6 +39,7 @@
 #include <android-base/stringprintf.h>
 #include <android/multinetwork.h>  // ResNsendFlags
 #include <cutils/sockets.h>
+#include <gmock/gmock-matchers.h>
 #include <gtest/gtest.h>
 #include <openssl/base64.h>
 #include <private/android_filesystem_config.h>
@@ -55,7 +56,7 @@
 #include "NetdConstants.h"
 #include "ResolverStats.h"
 
-#include "android/net/INetd.h"
+#include "android/net/IDnsResolver.h"
 #include "binder/IServiceManager.h"
 #include "netdutils/SocketOption.h"
 
@@ -85,28 +86,6 @@ ScopedAddrinfo safe_getaddrinfo(const char* node, const char* service,
 }
 }  // namespace
 
-// Emulates the behavior of UnorderedElementsAreArray, which currently cannot be used.
-// TODO: Use UnorderedElementsAreArray, which depends on being able to compile libgmock_host,
-// if that is not possible, improve this hacky algorithm, which is O(n**2)
-template <class A, class B>
-bool UnorderedCompareArray(const A& a, const B& b) {
-    if (a.size() != b.size()) return false;
-    for (const auto& a_elem : a) {
-        size_t a_count = 0;
-        for (const auto& a_elem2 : a) {
-            if (a_elem == a_elem2) {
-                ++a_count;
-            }
-        }
-        size_t b_count = 0;
-        for (const auto& b_elem : b) {
-            if (a_elem == b_elem) ++b_count;
-        }
-        if (a_count != b_count) return false;
-    }
-    return true;
-}
-
 class ResolverTest : public ::testing::Test {
   protected:
     struct DnsRecord {
@@ -117,7 +96,7 @@ class ResolverTest : public ::testing::Test {
 
     void SetUp() { mDnsClient.SetUp(); }
     void TearDown() {
-        mDnsClient.netdService()->resolverStopPrefix64Discovery(TEST_NETID);
+        mDnsClient.resolvService()->stopPrefix64Discovery(TEST_NETID);
         mDnsClient.TearDown();
     }
 
@@ -125,26 +104,29 @@ class ResolverTest : public ::testing::Test {
                          std::vector<std::string>* tlsServers, res_params* params,
                          std::vector<ResolverStats>* stats,
                          int* wait_for_pending_req_timeout_count) {
-        using android::net::INetd;
+        using android::net::IDnsResolver;
         std::vector<int32_t> params32;
         std::vector<int32_t> stats32;
         std::vector<int32_t> wait_for_pending_req_timeout_count32{0};
-        auto rv = mDnsClient.netdService()->getResolverInfo(TEST_NETID, servers, domains,
-                                                            tlsServers, &params32, &stats32,
-                                                            &wait_for_pending_req_timeout_count32);
+        auto rv = mDnsClient.resolvService()->getResolverInfo(
+                TEST_NETID, servers, domains, tlsServers, &params32, &stats32,
+                &wait_for_pending_req_timeout_count32);
 
-        if (!rv.isOk() || params32.size() != static_cast<size_t>(INetd::RESOLVER_PARAMS_COUNT)) {
+        if (!rv.isOk() ||
+            params32.size() != static_cast<size_t>(IDnsResolver::RESOLVER_PARAMS_COUNT)) {
             return false;
         }
         *params = res_params{
-                .sample_validity =
-                        static_cast<uint16_t>(params32[INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY]),
-                .success_threshold =
-                        static_cast<uint8_t>(params32[INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD]),
-                .min_samples = static_cast<uint8_t>(params32[INetd::RESOLVER_PARAMS_MIN_SAMPLES]),
-                .max_samples = static_cast<uint8_t>(params32[INetd::RESOLVER_PARAMS_MAX_SAMPLES]),
-                .base_timeout_msec = params32[INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC],
-                .retry_count = params32[INetd::RESOLVER_PARAMS_RETRY_COUNT],
+                .sample_validity = static_cast<uint16_t>(
+                        params32[IDnsResolver::RESOLVER_PARAMS_SAMPLE_VALIDITY]),
+                .success_threshold = static_cast<uint8_t>(
+                        params32[IDnsResolver::RESOLVER_PARAMS_SUCCESS_THRESHOLD]),
+                .min_samples =
+                        static_cast<uint8_t>(params32[IDnsResolver::RESOLVER_PARAMS_MIN_SAMPLES]),
+                .max_samples =
+                        static_cast<uint8_t>(params32[IDnsResolver::RESOLVER_PARAMS_MAX_SAMPLES]),
+                .base_timeout_msec = params32[IDnsResolver::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC],
+                .retry_count = params32[IDnsResolver::RESOLVER_PARAMS_RETRY_COUNT],
         };
         *wait_for_pending_req_timeout_count = wait_for_pending_req_timeout_count32[0];
         return ResolverStats::decodeAll(stats32, stats);
@@ -229,7 +211,7 @@ class ResolverTest : public ::testing::Test {
         const int limit = timeoutMs / intervalMs;
         for (int count = 0; count <= limit; ++count) {
             std::string prefix;
-            auto rv = mDnsClient.netdService()->getPrefix64(netId, &prefix);
+            auto rv = mDnsClient.resolvService()->getPrefix64(netId, &prefix);
             if (rv.isOk()) {
                 return true;
             }
@@ -334,6 +316,80 @@ TEST_F(ResolverTest, GetHostByName) {
     EXPECT_TRUE(result->h_addr_list[1] == nullptr);
 }
 
+TEST_F(ResolverTest, GetHostByName_cnames) {
+    constexpr char host_name[] = "host.example.com.";
+    size_t cnamecount = 0;
+    test::DNSResponder dns;
+
+    const std::vector<DnsRecord> records = {
+            {kHelloExampleCom, ns_type::ns_t_cname, "a.example.com."},
+            {"a.example.com.", ns_type::ns_t_cname, "b.example.com."},
+            {"b.example.com.", ns_type::ns_t_cname, "c.example.com."},
+            {"c.example.com.", ns_type::ns_t_cname, "d.example.com."},
+            {"d.example.com.", ns_type::ns_t_cname, "e.example.com."},
+            {"e.example.com.", ns_type::ns_t_cname, host_name},
+            {host_name, ns_type::ns_t_a, "1.2.3.3"},
+            {host_name, ns_type::ns_t_aaaa, "2001:db8::42"},
+    };
+    StartDns(dns, records);
+    ASSERT_TRUE(mDnsClient.SetResolversForNetwork());
+
+    // using gethostbyname2() to resolve ipv4 hello.example.com. to 1.2.3.3
+    // Ensure the v4 address and cnames are correct
+    const hostent* result;
+    result = gethostbyname2("hello", AF_INET);
+    ASSERT_FALSE(result == nullptr);
+
+    for (int i = 0; result != nullptr && result->h_aliases[i] != nullptr; i++) {
+        std::string domain_name = records[i].host_name.substr(0, records[i].host_name.size() - 1);
+        EXPECT_EQ(result->h_aliases[i], domain_name);
+        cnamecount++;
+    }
+    // The size of "Non-cname type" record in DNS records is 2
+    ASSERT_EQ(cnamecount, records.size() - 2);
+    ASSERT_EQ(4, result->h_length);
+    ASSERT_FALSE(result->h_addr_list[0] == nullptr);
+    EXPECT_EQ("1.2.3.3", ToString(result));
+    EXPECT_TRUE(result->h_addr_list[1] == nullptr);
+    EXPECT_EQ(1U, dns.queries().size()) << dns.dumpQueries();
+
+    // using gethostbyname2() to resolve ipv6 hello.example.com. to 2001:db8::42
+    // Ensure the v6 address and cnames are correct
+    cnamecount = 0;
+    dns.clearQueries();
+    result = gethostbyname2("hello", AF_INET6);
+    for (unsigned i = 0; result != nullptr && result->h_aliases[i] != nullptr; i++) {
+        std::string domain_name = records[i].host_name.substr(0, records[i].host_name.size() - 1);
+        EXPECT_EQ(result->h_aliases[i], domain_name);
+        cnamecount++;
+    }
+    // The size of "Non-cname type" DNS record in records is 2
+    ASSERT_EQ(cnamecount, records.size() - 2);
+    ASSERT_FALSE(result == nullptr);
+    ASSERT_EQ(16, result->h_length);
+    ASSERT_FALSE(result->h_addr_list[0] == nullptr);
+    EXPECT_EQ("2001:db8::42", ToString(result));
+    EXPECT_TRUE(result->h_addr_list[1] == nullptr);
+}
+
+TEST_F(ResolverTest, GetHostByName_cnamesInfiniteLoop) {
+    test::DNSResponder dns;
+    const std::vector<DnsRecord> records = {
+            {kHelloExampleCom, ns_type::ns_t_cname, "a.example.com."},
+            {"a.example.com.", ns_type::ns_t_cname, kHelloExampleCom},
+    };
+    StartDns(dns, records);
+    ASSERT_TRUE(mDnsClient.SetResolversForNetwork());
+
+    const hostent* result;
+    result = gethostbyname2("hello", AF_INET);
+    ASSERT_TRUE(result == nullptr);
+
+    dns.clearQueries();
+    result = gethostbyname2("hello", AF_INET6);
+    ASSERT_TRUE(result == nullptr);
+}
+
 TEST_F(ResolverTest, GetHostByName_localhost) {
     constexpr char name_camelcase[] = "LocalHost";
     constexpr char name_ip6_dot[] = "ip6-localhost.";
@@ -433,14 +489,17 @@ TEST_F(ResolverTest, GetHostByName_numeric) {
 }
 
 TEST_F(ResolverTest, BinderSerialization) {
-    using android::net::INetd;
+    using android::net::IDnsResolver;
     std::vector<int> params_offsets = {
-            INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY,   INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD,
-            INetd::RESOLVER_PARAMS_MIN_SAMPLES,       INetd::RESOLVER_PARAMS_MAX_SAMPLES,
-            INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC, INetd::RESOLVER_PARAMS_RETRY_COUNT,
+            IDnsResolver::RESOLVER_PARAMS_SAMPLE_VALIDITY,
+            IDnsResolver::RESOLVER_PARAMS_SUCCESS_THRESHOLD,
+            IDnsResolver::RESOLVER_PARAMS_MIN_SAMPLES,
+            IDnsResolver::RESOLVER_PARAMS_MAX_SAMPLES,
+            IDnsResolver::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC,
+            IDnsResolver::RESOLVER_PARAMS_RETRY_COUNT,
     };
     const int size = static_cast<int>(params_offsets.size());
-    EXPECT_EQ(size, INetd::RESOLVER_PARAMS_COUNT);
+    EXPECT_EQ(size, IDnsResolver::RESOLVER_PARAMS_COUNT);
     std::sort(params_offsets.begin(), params_offsets.end());
     for (int i = 0; i < size; ++i) {
         EXPECT_EQ(params_offsets[i], i);
@@ -448,7 +507,7 @@ TEST_F(ResolverTest, BinderSerialization) {
 }
 
 TEST_F(ResolverTest, GetHostByName_Binder) {
-    using android::net::INetd;
+    using android::net::IDnsResolver;
 
     std::vector<std::string> domains = { "example.com" };
     std::vector<std::unique_ptr<test::DNSResponder>> dns;
@@ -485,18 +544,19 @@ TEST_F(ResolverTest, GetHostByName_Binder) {
     EXPECT_EQ(servers.size(), res_servers.size());
     EXPECT_EQ(domains.size(), res_domains.size());
     EXPECT_EQ(0U, res_tls_servers.size());
-    ASSERT_EQ(static_cast<size_t>(INetd::RESOLVER_PARAMS_COUNT), kDefaultParams.size());
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY], res_params.sample_validity);
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD],
+    ASSERT_EQ(static_cast<size_t>(IDnsResolver::RESOLVER_PARAMS_COUNT), kDefaultParams.size());
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_SAMPLE_VALIDITY],
+              res_params.sample_validity);
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_SUCCESS_THRESHOLD],
               res_params.success_threshold);
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_MIN_SAMPLES], res_params.min_samples);
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_MAX_SAMPLES], res_params.max_samples);
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC],
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_MIN_SAMPLES], res_params.min_samples);
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_MAX_SAMPLES], res_params.max_samples);
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC],
               res_params.base_timeout_msec);
     EXPECT_EQ(servers.size(), res_stats.size());
 
-    EXPECT_TRUE(UnorderedCompareArray(res_servers, servers));
-    EXPECT_TRUE(UnorderedCompareArray(res_domains, domains));
+    EXPECT_THAT(res_servers, testing::UnorderedElementsAreArray(servers));
+    EXPECT_THAT(res_domains, testing::UnorderedElementsAreArray(domains));
 
     ASSERT_NO_FATAL_FAILURE(mDnsClient.ShutdownDNSServers(&dns));
 }
@@ -727,6 +787,70 @@ TEST_F(ResolverTest, GetAddrInfoV4_deferred_resp) {
     t2.join();
 }
 
+TEST_F(ResolverTest, GetAddrInfo_cnames) {
+    constexpr char host_name[] = "host.example.com.";
+    test::DNSResponder dns;
+    const std::vector<DnsRecord> records = {
+            {kHelloExampleCom, ns_type::ns_t_cname, "a.example.com."},
+            {"a.example.com.", ns_type::ns_t_cname, "b.example.com."},
+            {"b.example.com.", ns_type::ns_t_cname, "c.example.com."},
+            {"c.example.com.", ns_type::ns_t_cname, "d.example.com."},
+            {"d.example.com.", ns_type::ns_t_cname, "e.example.com."},
+            {"e.example.com.", ns_type::ns_t_cname, host_name},
+            {host_name, ns_type::ns_t_a, "1.2.3.3"},
+            {host_name, ns_type::ns_t_aaaa, "2001:db8::42"},
+    };
+    StartDns(dns, records);
+    ASSERT_TRUE(mDnsClient.SetResolversForNetwork());
+
+    addrinfo hints = {.ai_family = AF_INET};
+    ScopedAddrinfo result = safe_getaddrinfo("hello", nullptr, &hints);
+    EXPECT_TRUE(result != nullptr);
+    EXPECT_EQ("1.2.3.3", ToString(result));
+
+    dns.clearQueries();
+    hints = {.ai_family = AF_INET6};
+    result = safe_getaddrinfo("hello", nullptr, &hints);
+    EXPECT_TRUE(result != nullptr);
+    EXPECT_EQ("2001:db8::42", ToString(result));
+}
+
+TEST_F(ResolverTest, GetAddrInfo_cnamesNoIpAddress) {
+    test::DNSResponder dns;
+    const std::vector<DnsRecord> records = {
+            {kHelloExampleCom, ns_type::ns_t_cname, "a.example.com."},
+    };
+    StartDns(dns, records);
+    ASSERT_TRUE(mDnsClient.SetResolversForNetwork());
+
+    addrinfo hints = {.ai_family = AF_INET};
+    ScopedAddrinfo result = safe_getaddrinfo("hello", nullptr, &hints);
+    EXPECT_TRUE(result == nullptr);
+
+    dns.clearQueries();
+    hints = {.ai_family = AF_INET6};
+    result = safe_getaddrinfo("hello", nullptr, &hints);
+    EXPECT_TRUE(result == nullptr);
+}
+
+TEST_F(ResolverTest, GetAddrInfo_cnamesIllegalRdata) {
+    test::DNSResponder dns;
+    const std::vector<DnsRecord> records = {
+            {kHelloExampleCom, ns_type::ns_t_cname, ".!#?"},
+    };
+    StartDns(dns, records);
+    ASSERT_TRUE(mDnsClient.SetResolversForNetwork());
+
+    addrinfo hints = {.ai_family = AF_INET};
+    ScopedAddrinfo result = safe_getaddrinfo("hello", nullptr, &hints);
+    EXPECT_TRUE(result == nullptr);
+
+    dns.clearQueries();
+    hints = {.ai_family = AF_INET6};
+    result = safe_getaddrinfo("hello", nullptr, &hints);
+    EXPECT_TRUE(result == nullptr);
+}
+
 TEST_F(ResolverTest, MultidomainResolution) {
     constexpr char host_name[] = "nihao.example2.com.";
     std::vector<std::string> searchDomains = { "example1.com", "example2.com", "example3.com" };
@@ -915,7 +1039,7 @@ TEST_F(ResolverTest, GetAddrInfoStressTest_Binder_100000) {
 }
 
 TEST_F(ResolverTest, EmptySetup) {
-    using android::net::INetd;
+    using android::net::IDnsResolver;
     std::vector<std::string> servers;
     std::vector<std::string> domains;
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers, domains));
@@ -930,15 +1054,16 @@ TEST_F(ResolverTest, EmptySetup) {
     EXPECT_EQ(0U, res_servers.size());
     EXPECT_EQ(0U, res_domains.size());
     EXPECT_EQ(0U, res_tls_servers.size());
-    ASSERT_EQ(static_cast<size_t>(INetd::RESOLVER_PARAMS_COUNT), kDefaultParams.size());
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_SAMPLE_VALIDITY], res_params.sample_validity);
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_SUCCESS_THRESHOLD],
+    ASSERT_EQ(static_cast<size_t>(IDnsResolver::RESOLVER_PARAMS_COUNT), kDefaultParams.size());
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_SAMPLE_VALIDITY],
+              res_params.sample_validity);
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_SUCCESS_THRESHOLD],
               res_params.success_threshold);
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_MIN_SAMPLES], res_params.min_samples);
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_MAX_SAMPLES], res_params.max_samples);
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC],
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_MIN_SAMPLES], res_params.min_samples);
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_MAX_SAMPLES], res_params.max_samples);
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC],
               res_params.base_timeout_msec);
-    EXPECT_EQ(kDefaultParams[INetd::RESOLVER_PARAMS_RETRY_COUNT], res_params.retry_count);
+    EXPECT_EQ(kDefaultParams[IDnsResolver::RESOLVER_PARAMS_RETRY_COUNT], res_params.retry_count);
 }
 
 TEST_F(ResolverTest, SearchPathChange) {
@@ -1009,8 +1134,6 @@ static void shutdownTlsServers(std::vector<std::unique_ptr<test::DnsTlsFrontend>
 }
 
 TEST_F(ResolverTest, MaxServerPrune_Binder) {
-    using android::net::INetd;
-
     std::vector<std::string> domains;
     std::vector<std::unique_ptr<test::DNSResponder>> dns;
     std::vector<std::unique_ptr<test::DnsTlsFrontend>> tls;
@@ -1671,7 +1794,7 @@ TEST_F(ResolverTest, StrictMode_NoTlsServers) {
 
 namespace {
 
-int getAsyncResponse(int fd, int* rcode, u_char* buf, int bufLen) {
+int getAsyncResponse(int fd, int* rcode, uint8_t* buf, int bufLen) {
     struct pollfd wait_fd[1];
     wait_fd[0].fd = fd;
     wait_fd[0].events = POLLIN;
@@ -1691,7 +1814,7 @@ int getAsyncResponse(int fd, int* rcode, u_char* buf, int bufLen) {
     return -1;
 }
 
-std::string toString(u_char* buf, int bufLen, int ipType) {
+std::string toString(uint8_t* buf, int bufLen, int ipType) {
     ns_msg handle;
     int ancount, n = 0;
     ns_rr rr;
@@ -1699,7 +1822,7 @@ std::string toString(u_char* buf, int bufLen, int ipType) {
     if (ns_initparse((const uint8_t*) buf, bufLen, &handle) >= 0) {
         ancount = ns_msg_count(handle, ns_s_an);
         if (ns_parserr(&handle, ns_s_an, n, &rr) == 0) {
-            const u_char* rdata = ns_rr_rdata(rr);
+            const uint8_t* rdata = ns_rr_rdata(rr);
             char buffer[INET6_ADDRSTRLEN];
             if (inet_ntop(ipType, (const char*) rdata, buffer, sizeof(buffer))) {
                 return buffer;
@@ -1768,7 +1891,7 @@ TEST_F(ResolverTest, Async_NormalQueryV4V6) {
     EXPECT_TRUE(fd1 != -1);
     EXPECT_TRUE(fd2 != -1);
 
-    u_char buf[MAXPACKET] = {};
+    uint8_t buf[MAXPACKET] = {};
     int rcode;
     int res = getAsyncResponse(fd2, &rcode, buf, MAXPACKET);
     EXPECT_GT(res, 0);
@@ -1832,7 +1955,7 @@ TEST_F(ResolverTest, Async_BadQuery) {
 
     // dns_responder return empty resp(packet only contains query part) with no error currently
     for (const auto& td : kTestData) {
-        u_char buf[MAXPACKET] = {};
+        uint8_t buf[MAXPACKET] = {};
         int rcode;
         SCOPED_TRACE(td.dname);
         int res = getAsyncResponse(td.fd, &rcode, buf, MAXPACKET);
@@ -1949,7 +2072,7 @@ TEST_F(ResolverTest, Async_MalformedQuery) {
     ssize_t rc = TEMP_FAILURE_RETRY(write(fd, cmd.c_str(), cmd.size()));
     EXPECT_EQ(rc, static_cast<ssize_t>(cmd.size()));
 
-    u_char smallBuf[1] = {};
+    uint8_t smallBuf[1] = {};
     int rcode;
     rc = getAsyncResponse(fd, &rcode, smallBuf, 1);
     EXPECT_EQ(-EMSGSIZE, rc);
@@ -1959,7 +2082,7 @@ TEST_F(ResolverTest, Async_MalformedQuery) {
     EXPECT_TRUE(fd > 0);
     rc = TEMP_FAILURE_RETRY(write(fd, cmd.c_str(), cmd.size()));
     EXPECT_EQ(rc, static_cast<ssize_t>(cmd.size()));
-    u_char buf[MAXPACKET] = {};
+    uint8_t buf[MAXPACKET] = {};
     rc = getAsyncResponse(fd, &rcode, buf, MAXPACKET);
     EXPECT_EQ("1.2.3.4", toString(buf, rc, AF_INET));
 }
@@ -2028,22 +2151,58 @@ TEST_F(ResolverTest, Async_CacheFlags) {
 
     // Cache hits,  expect still 6 queries
     EXPECT_EQ(6U, GetNumQueries(dns, host_name));
+
+    // Start to verify if ANDROID_RESOLV_NO_CACHE_LOOKUP does write response into cache
+    dns.clearQueries();
+
+    fd1 = resNetworkQuery(TEST_NETID, "howdy.example.com", ns_c_in, ns_t_aaaa,
+                          ANDROID_RESOLV_NO_CACHE_LOOKUP);
+    fd2 = resNetworkQuery(TEST_NETID, "howdy.example.com", ns_c_in, ns_t_aaaa,
+                          ANDROID_RESOLV_NO_CACHE_LOOKUP);
+
+    EXPECT_TRUE(fd1 != -1);
+    EXPECT_TRUE(fd2 != -1);
+
+    expectAnswersValid(fd2, AF_INET6, "::1.2.3.4");
+    expectAnswersValid(fd1, AF_INET6, "::1.2.3.4");
+
+    // Skip cache, expect 2 queries
+    EXPECT_EQ(2U, GetNumQueries(dns, host_name));
+
+    // Re-query without flags
+    fd1 = resNetworkQuery(TEST_NETID, "howdy.example.com", ns_c_in, ns_t_aaaa, 0);
+    fd2 = resNetworkQuery(TEST_NETID, "howdy.example.com", ns_c_in, ns_t_aaaa, 0);
+
+    EXPECT_TRUE(fd1 != -1);
+    EXPECT_TRUE(fd2 != -1);
+
+    expectAnswersValid(fd2, AF_INET6, "::1.2.3.4");
+    expectAnswersValid(fd1, AF_INET6, "::1.2.3.4");
+
+    // Cache hits, expect still 2 queries
+    EXPECT_EQ(2U, GetNumQueries(dns, host_name));
 }
 
 TEST_F(ResolverTest, Async_NoRetryFlag) {
-    constexpr char listen_addr[] = "127.0.0.4";
+    constexpr char listen_addr0[] = "127.0.0.4";
+    constexpr char listen_addr1[] = "127.0.0.6";
     constexpr char host_name[] = "howdy.example.com.";
     const std::vector<DnsRecord> records = {
             {host_name, ns_type::ns_t_a, "1.2.3.4"},
             {host_name, ns_type::ns_t_aaaa, "::1.2.3.4"},
     };
 
-    test::DNSResponder dns(listen_addr);
-    StartDns(dns, records);
-    std::vector<std::string> servers = {listen_addr};
-    ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
+    test::DNSResponder dns0(listen_addr0);
+    test::DNSResponder dns1(listen_addr1);
+    StartDns(dns0, records);
+    StartDns(dns1, records);
+    ASSERT_TRUE(mDnsClient.SetResolversForNetwork({listen_addr0, listen_addr1}));
 
-    dns.setResponseProbability(0.0);
+    dns0.clearQueries();
+    dns1.clearQueries();
+
+    dns0.setResponseProbability(0.0);
+    dns1.setResponseProbability(0.0);
 
     int fd1 = resNetworkQuery(TEST_NETID, "howdy.example.com", ns_c_in, ns_t_a,
                               ANDROID_RESOLV_NO_RETRY);
@@ -2057,10 +2216,11 @@ TEST_F(ResolverTest, Async_NoRetryFlag) {
     expectAnswersNotValid(fd1, -ETIMEDOUT);
     expectAnswersNotValid(fd2, -ETIMEDOUT);
 
-    // No retry case, expect 2 queries
-    EXPECT_EQ(2U, GetNumQueries(dns, host_name));
+    // No retry case, expect total 2 queries. The server is selected randomly.
+    EXPECT_EQ(2U, GetNumQueries(dns0, host_name) + GetNumQueries(dns1, host_name));
 
-    dns.clearQueries();
+    dns0.clearQueries();
+    dns1.clearQueries();
 
     fd1 = resNetworkQuery(TEST_NETID, "howdy.example.com", ns_c_in, ns_t_a, 0);
     EXPECT_TRUE(fd1 != -1);
@@ -2073,7 +2233,80 @@ TEST_F(ResolverTest, Async_NoRetryFlag) {
     expectAnswersNotValid(fd2, -ETIMEDOUT);
 
     // Retry case, expect 4 queries
-    EXPECT_EQ(4U, GetNumQueries(dns, host_name));
+    EXPECT_EQ(4U, GetNumQueries(dns0, host_name));
+    EXPECT_EQ(4U, GetNumQueries(dns1, host_name));
+}
+
+TEST_F(ResolverTest, Async_VerifyQueryID) {
+    constexpr char listen_addr[] = "127.0.0.4";
+    constexpr char host_name[] = "howdy.example.com.";
+    const std::vector<DnsRecord> records = {
+            {host_name, ns_type::ns_t_a, "1.2.3.4"},
+            {host_name, ns_type::ns_t_aaaa, "::1.2.3.4"},
+    };
+
+    test::DNSResponder dns(listen_addr);
+    StartDns(dns, records);
+    std::vector<std::string> servers = {listen_addr};
+    ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
+
+    const uint8_t queryBuf1[] = {
+            /* Header */
+            0x55, 0x66, /* Transaction ID */
+            0x01, 0x00, /* Flags */
+            0x00, 0x01, /* Questions */
+            0x00, 0x00, /* Answer RRs */
+            0x00, 0x00, /* Authority RRs */
+            0x00, 0x00, /* Additional RRs */
+            /* Queries */
+            0x05, 0x68, 0x6f, 0x77, 0x64, 0x79, 0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65,
+            0x03, 0x63, 0x6f, 0x6d, 0x00, /* Name */
+            0x00, 0x01,                   /* Type */
+            0x00, 0x01                    /* Class */
+    };
+
+    int fd = resNetworkSend(TEST_NETID, queryBuf1, sizeof(queryBuf1), 0);
+    EXPECT_TRUE(fd != -1);
+
+    uint8_t buf[MAXPACKET] = {};
+    int rcode;
+
+    int res = getAsyncResponse(fd, &rcode, buf, MAXPACKET);
+    EXPECT_GT(res, 0);
+    EXPECT_EQ("1.2.3.4", toString(buf, res, AF_INET));
+
+    auto hp = reinterpret_cast<HEADER*>(buf);
+    EXPECT_EQ(21862U, htons(hp->id));
+
+    EXPECT_EQ(1U, GetNumQueries(dns, host_name));
+
+    const uint8_t queryBuf2[] = {
+            /* Header */
+            0x00, 0x53, /* Transaction ID */
+            0x01, 0x00, /* Flags */
+            0x00, 0x01, /* Questions */
+            0x00, 0x00, /* Answer RRs */
+            0x00, 0x00, /* Authority RRs */
+            0x00, 0x00, /* Additional RRs */
+            /* Queries */
+            0x05, 0x68, 0x6f, 0x77, 0x64, 0x79, 0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65,
+            0x03, 0x63, 0x6f, 0x6d, 0x00, /* Name */
+            0x00, 0x01,                   /* Type */
+            0x00, 0x01                    /* Class */
+    };
+
+    // Re-query verify cache works and query id is correct
+    fd = resNetworkSend(TEST_NETID, queryBuf2, sizeof(queryBuf2), 0);
+
+    EXPECT_TRUE(fd != -1);
+
+    res = getAsyncResponse(fd, &rcode, buf, MAXPACKET);
+    EXPECT_GT(res, 0);
+    EXPECT_EQ("1.2.3.4", toString(buf, res, AF_INET));
+
+    EXPECT_EQ(0x0053U, htons(hp->id));
+
+    EXPECT_EQ(1U, GetNumQueries(dns, host_name));
 }
 
 // This test checks that the resolver should not generate the request containing OPT RR when using
@@ -2308,7 +2541,7 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64Synthesize) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // hints are necessary in order to let netd know which type of addresses the caller is
@@ -2324,7 +2557,7 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64Synthesize) {
     EXPECT_EQ(result_str, "64:ff9b::102:304");
 
     // Stopping NAT64 prefix discovery disables synthesis.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStopPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->stopPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_FALSE(WaitForPrefix64Detected(TEST_NETID, 300));
 
     dns.clearQueries();
@@ -2354,7 +2587,7 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QuerySpecified) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Ensure to synthesize AAAA if AF_INET6 is specified, and not to synthesize AAAA
@@ -2391,7 +2624,7 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QueryUnspecifiedV6) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     const addrinfo hints = {.ai_family = AF_UNSPEC};
@@ -2422,7 +2655,7 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QueryUnspecifiedNoV6) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     const addrinfo hints = {.ai_family = AF_UNSPEC};
@@ -2457,7 +2690,7 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QuerySpecialUseIPv4Addresses) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     static const struct TestConfig {
@@ -2520,7 +2753,7 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QueryWithNullArgumentHints) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Assign argument hints of getaddrinfo() as null is equivalent to set ai_family AF_UNSPEC.
@@ -2561,7 +2794,7 @@ TEST_F(ResolverTest, GetAddrInfo_Dns64QueryNullArgumentNode) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // If node is null, return address is listed by libc/getaddrinfo.c as follows.
@@ -2641,7 +2874,7 @@ TEST_F(ResolverTest, GetHostByAddr_ReverseDnsQueryWithHavingNat64Prefix) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Reverse IPv4 DNS query. Prefix should have no effect on it.
@@ -2685,7 +2918,7 @@ TEST_F(ResolverTest, GetHostByAddr_ReverseDns64Query) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Synthesized PTR record doesn't exist on DNS server
@@ -2731,7 +2964,7 @@ TEST_F(ResolverTest, GetHostByAddr_ReverseDns64QueryFromHostFile) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Using synthesized "localhost" address to be a trick for resolving host name
@@ -2773,7 +3006,7 @@ TEST_F(ResolverTest, GetNameInfo_ReverseDnsQueryWithHavingNat64Prefix) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     static const struct TestConfig {
@@ -2852,7 +3085,7 @@ TEST_F(ResolverTest, GetNameInfo_ReverseDns64Query) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     static const struct TestConfig {
@@ -2922,7 +3155,7 @@ TEST_F(ResolverTest, GetNameInfo_ReverseDns64QueryFromHostFile) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Using synthesized "localhost" address to be a trick for resolving host name
@@ -2956,7 +3189,7 @@ TEST_F(ResolverTest, GetHostByName2_Dns64Synthesize) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // Query an IPv4-only hostname. Expect that gets a synthesized address.
@@ -2983,7 +3216,7 @@ TEST_F(ResolverTest, GetHostByName2_DnsQueryWithHavingNat64Prefix) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     // IPv4 DNS query. Prefix should have no effect on it.
@@ -3024,7 +3257,7 @@ TEST_F(ResolverTest, GetHostByName2_Dns64QuerySpecialUseIPv4Addresses) {
     ASSERT_TRUE(mDnsClient.SetResolversForNetwork(servers));
 
     // Start NAT64 prefix discovery and wait for it to complete.
-    EXPECT_TRUE(mDnsClient.netdService()->resolverStartPrefix64Discovery(TEST_NETID).isOk());
+    EXPECT_TRUE(mDnsClient.resolvService()->startPrefix64Discovery(TEST_NETID).isOk());
     EXPECT_TRUE(WaitForPrefix64Detected(TEST_NETID, 1000));
 
     static const struct TestConfig {
