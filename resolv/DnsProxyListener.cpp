@@ -38,30 +38,32 @@
 #include <android-base/stringprintf.h>
 #include <android/multinetwork.h>  // ResNsendFlags
 #include <cutils/misc.h>           // FIRST_APPLICATION_UID
+#include <netdutils/InternetAddresses.h>
 #include <netdutils/OperationLimiter.h>
+#include <netdutils/ResponseCode.h>
 #include <netdutils/Slice.h>
+#include <netdutils/Stopwatch.h>
+#include <netdutils/ThreadUtil.h>
 #include <private/android_filesystem_config.h>  // AID_SYSTEM
 #include <resolv.h>
 #include <statslog.h>
 #include <sysutils/SocketClient.h>
 
-// TODO: Considering moving ResponseCode.h Stopwatch.h thread_util.h to libnetdutils.
 #include "DnsResolver.h"
 #include "NetdClient.h"  // NETID_USE_LOCAL_NAMESERVERS
 #include "NetdPermissions.h"
 #include "ResolverEventReporter.h"
-#include "ResponseCode.h"
-#include "Stopwatch.h"
 #include "netd_resolv/stats.h"  // RCODE_TIMEOUT
-#include "netdutils/InternetAddresses.h"
 #include "resolv_private.h"
-#include "thread_util.h"
 
 using aidl::android::net::metrics::INetdEventListener;
 
 namespace android {
-namespace net {
 
+using netdutils::ResponseCode;
+using netdutils::Stopwatch;
+
+namespace net {
 namespace {
 
 // Limits the number of outstanding DNS queries by client UID.
@@ -83,7 +85,7 @@ template<typename T>
 void tryThreadOrError(SocketClient* cli, T* handler) {
     cli->incRef();
 
-    const int rval = threadLaunch(handler);
+    const int rval = netdutils::threadLaunch(handler);
     if (rval == 0) {
         // SocketClient decRef() happens in the handler's run() method.
         return;
@@ -297,15 +299,17 @@ void reportDnsEvent(int eventType, const android_net_context& netContext, int la
     android::util::stats_write(android::util::NETWORK_DNS_EVENT_REPORTED, eventType, returnCode,
                                latencyUs);
 
-    const std::shared_ptr<INetdEventListener> listener = ResolverEventReporter::getListener();
-    if (!listener) {
+    const auto& listeners = ResolverEventReporter::getInstance().getListeners();
+    if (listeners.size() == 0) {
         LOG(ERROR) << __func__
-                   << ": DNS event not sent since NetdEventListenerService is unavailable.";
+                   << ": DNS event not sent since no INetdEventListener receiver is available.";
         return;
     }
     const int latencyMs = latencyUs / 1000;
-    listener->onDnsEvent(netContext.dns_netid, eventType, returnCode, latencyMs, query_name,
-                         ip_addrs, total_ip_addr_count, netContext.uid);
+    for (const auto& it : listeners) {
+        it->onDnsEvent(netContext.dns_netid, eventType, returnCode, latencyMs, query_name, ip_addrs,
+                       total_ip_addr_count, netContext.uid);
+    }
 }
 
 bool onlyIPv4Answers(const addrinfo* res) {
@@ -475,14 +479,7 @@ bool synthesizeNat64PrefixWithARecord(const netdutils::IPPrefix& prefix, addrinf
 }
 
 bool getDns64Prefix(unsigned netId, netdutils::IPPrefix* prefix) {
-    in6_addr v6addr{};
-    uint8_t prefixLen = 0;
-    if (!gResNetdCallbacks.get_dns64_prefix(netId, &v6addr, &prefixLen)) {
-        return false;
-    }
-    const netdutils::IPAddress ipv6(v6addr);
-    *prefix = netdutils::IPPrefix(ipv6, static_cast<int>(prefixLen));
-    return true;
+    return !gDnsResolv->resolverCtrl.getPrefix64(netId, prefix);
 }
 
 }  // namespace
