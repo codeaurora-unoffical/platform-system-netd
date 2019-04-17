@@ -69,6 +69,9 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
  * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+
+#define LOG_TAG "res_init"
+
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -137,8 +140,6 @@ int res_vinit(res_state statp, int preinit) {
 
     if (!preinit) {
         statp->netid = NETID_UNSET;
-        statp->retrans = RES_TIMEOUT;
-        statp->retry = RES_DFLRETRY;
         statp->options = RES_DEFAULT;
         statp->id = arc4random_uniform(65536);
         statp->_mark = MARK_UNSET;
@@ -151,7 +152,6 @@ int res_vinit(res_state statp, int preinit) {
     nserv++;
     statp->nscount = 0;
     statp->ndots = 1;
-    statp->pfcode = 0;
     statp->_vcsock = -1;
     statp->_flags = 0;
     statp->_u._ext.nscount = 0;
@@ -187,9 +187,8 @@ int res_vinit(res_state statp, int preinit) {
             dots--;
         }
         *pp = NULL;
-        LOG(DEBUG) << ";; res_init()... default dnsrch list:";
-        for (pp = statp->dnsrch; *pp; pp++) LOG(DEBUG) << ";;\t" << *pp;
-        LOG(DEBUG) << ";;\t..END..";
+        LOG(DEBUG) << __func__ << ": dnsrch list:";
+        for (pp = statp->dnsrch; *pp; pp++) LOG(DEBUG) << "\t" << *pp;
     }
 
     if ((cp = getenv("RES_OPTIONS")) != NULL) res_setoptions(statp, cp, "env");
@@ -205,7 +204,7 @@ static void res_setoptions(res_state statp, const char* options, const char* sou
     int i;
     res_state_ext* ext = statp->_u._ext.ext;
 
-    LOG(DEBUG) << ";; res_setoptions(\"" << options << "\", \"" << source << "\")...";
+    LOG(DEBUG) << "res_setoptions(\"" << options << "\", \"" << source << "\")...";
 
     while (*cp) {
         /* skip leading and inner runs of spaces */
@@ -217,33 +216,14 @@ static void res_setoptions(res_state statp, const char* options, const char* sou
                 statp->ndots = i;
             else
                 statp->ndots = RES_MAXNDOTS;
-
-            LOG(DEBUG) << ";;\tndots=" << statp->ndots;
-
-        } else if (!strncmp(cp, "timeout:", sizeof("timeout:") - 1)) {
-            i = atoi(cp + sizeof("timeout:") - 1);
-            if (i <= RES_MAXRETRANS)
-                statp->retrans = i;
-            else
-                statp->retrans = RES_MAXRETRANS;
-
-            LOG(DEBUG) << ";;\ttimeout=" << statp->retrans;
-
-        } else if (!strncmp(cp, "attempts:", sizeof("attempts:") - 1)) {
-            i = atoi(cp + sizeof("attempts:") - 1);
-            if (i <= RES_MAXRETRY)
-                statp->retry = i;
-            else
-                statp->retry = RES_MAXRETRY;
-
-            LOG(DEBUG) << ";;\tattempts=" << statp->retry;
+            LOG(DEBUG) << "\tndots=" << statp->ndots;
 
         } else if (!strncmp(cp, "debug", sizeof("debug") - 1)) {
             if (!(statp->options & RES_DEBUG)) {
-                LOG(DEBUG) << ";; res_setoptions(\"" << options << "\", \"" << source << "\")..";
+                LOG(DEBUG) << "res_setoptions(\"" << options << "\", \"" << source << "\")..";
                 statp->options |= RES_DEBUG;
             }
-            LOG(DEBUG) << ";;\tdebug";
+            LOG(DEBUG) << "\tdebug";
 
         } else if (!strncmp(cp, "no_tld_query", sizeof("no_tld_query") - 1) ||
                    !strncmp(cp, "no-tld-query", sizeof("no-tld-query") - 1)) {

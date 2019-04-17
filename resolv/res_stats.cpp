@@ -120,22 +120,22 @@ static bool res_stats_usable_server(const res_params* params, res_stats* stats) 
                                     &rtt_avg, &last_sample_time);
     if (successes >= 0 && errors >= 0 && timeouts >= 0) {
         int total = successes + errors + timeouts;
-        LOG(INFO) << "NS stats: S " << successes << " + E " << errors << " + T " << timeouts
-                  << " + I " << internal_errors << " = " << total << ", rtt = " << rtt_avg
-                  << ", min_samples = " << params->min_samples;
+        LOG(INFO) << __func__ << ": NS stats: S " << successes << " + E " << errors << " + T "
+                  << timeouts << " + I " << internal_errors << " = " << total
+                  << ", rtt = " << rtt_avg << ", min_samples = " << unsigned(params->min_samples);
         if (total >= params->min_samples && (errors > 0 || timeouts > 0)) {
             int success_rate = successes * 100 / total;
-            LOG(INFO) << "success rate " << success_rate;
+            LOG(INFO) << __func__ << ": success rate " << success_rate;
             if (success_rate < params->success_threshold) {
                 time_t now = time(NULL);
                 if (now - last_sample_time > params->sample_validity) {
                     // Note: It might be worth considering to expire old servers after their expiry
                     // date has been reached, however the code for returning the ring buffer to its
                     // previous non-circular state would induce additional complexity.
-                    LOG(INFO) << "samples stale, retrying server";
+                    LOG(INFO) << __func__ << ": samples stale, retrying server";
                     _res_stats_clear_samples(stats);
                 } else {
-                    LOG(INFO) << "too many resolution errors, ignoring server";
+                    LOG(INFO) << __func__ << ": too many resolution errors, ignoring server";
                     return 0;
                 }
             }
@@ -144,8 +144,8 @@ static bool res_stats_usable_server(const res_params* params, res_stats* stats) 
     return 1;
 }
 
-void android_net_res_stats_get_usable_servers(const res_params* params, res_stats stats[],
-                                              int nscount, bool usable_servers[]) {
+int android_net_res_stats_get_usable_servers(const res_params* params, res_stats stats[],
+                                             int nscount, bool usable_servers[]) {
     unsigned usable_servers_found = 0;
     for (int ns = 0; ns < nscount; ns++) {
         bool usable = res_stats_usable_server(params, &stats[ns]);
@@ -161,4 +161,5 @@ void android_net_res_stats_get_usable_servers(const res_params* params, res_stat
             usable_servers[ns] = true;
         }
     }
+    return (usable_servers_found == 0) ? nscount : usable_servers_found;
 }

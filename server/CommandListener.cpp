@@ -33,6 +33,7 @@
 
 #include <log/log.h>
 #include <netd_resolv/params.h>
+#include <netdutils/ResponseCode.h>
 #include <netdutils/Status.h>
 #include <netdutils/StatusOr.h>
 #include <netutils/ifc.h>
@@ -45,7 +46,6 @@
 #include "IdletimerController.h"
 #include "InterfaceController.h"
 #include "NetdConstants.h"
-#include "ResponseCode.h"
 #include "RouteController.h"
 #include "UidRanges.h"
 #include "netid_client.h"
@@ -54,8 +54,10 @@
 #include <vector>
 
 namespace android {
-namespace net {
 
+using netdutils::ResponseCode;
+
+namespace net {
 namespace {
 
 const unsigned NUM_OEM_IDS = NetworkController::MAX_OEM_ID - NetworkController::MIN_OEM_ID + 1;
@@ -364,7 +366,8 @@ int CommandListener::IpFwdCmd::runCommand(SocketClient *cli, int argc, char **ar
             char *tmp = nullptr;
 
             asprintf(&tmp, "Forwarding %s",
-                     ((gCtls->tetherCtrl.forwardingRequestCount() > 0) ? "enabled" : "disabled"));
+                     ((gCtls->tetherCtrl.getIpfwdRequesterList().size() > 0) ? "enabled"
+                                                                             : "disabled"));
             cli->sendMsg(ResponseCode::IpFwdStatusResult, tmp, false);
             free(tmp);
             return 0;
@@ -624,7 +627,8 @@ int CommandListener::ResolverCmd::runCommand(SocketClient *cli, int argc, char *
         }
     } else if (!strcmp(argv[1], "clearnetdns")) { // "resolver clearnetdns <netId>"
         if (argc == 3) {
-            rc = gCtls->resolverCtrl.clearDnsServers(netId);
+            // TODO: add resolver command back after NDC migrating to binder ver.
+            rc = -1;
         } else {
             cli->sendMsg(ResponseCode::CommandSyntaxError,
                     "Wrong number of arguments to resolver clearnetdns", false);
@@ -644,8 +648,10 @@ int CommandListener::ResolverCmd::runCommand(SocketClient *cli, int argc, char *
     return 0;
 }
 
-bool CommandListener::ResolverCmd::parseAndExecuteSetNetDns(int netId, int argc,
-        const char** argv) {
+bool CommandListener::ResolverCmd::parseAndExecuteSetNetDns(int, int argc, const char** argv) {
+    // TODO: add resolver command back after NDC migrating to binder ver.
+    return false;
+
     // "resolver setnetdns <netId> <domains> <dns1> [<dns2> ...] [--params <params>]"
     // TODO: This code has to be replaced by a Binder call ASAP
     if (argc < 5) {
@@ -663,7 +669,7 @@ bool CommandListener::ResolverCmd::parseAndExecuteSetNetDns(int netId, int argc,
         }
         paramsPtr = &params;
     }
-    return gCtls->resolverCtrl.setDnsServers(netId, argv[3], &argv[4], end - 4, paramsPtr) == 0;
+    return false;
 }
 
 CommandListener::BandwidthControlCmd::BandwidthControlCmd() :
@@ -1340,7 +1346,7 @@ int CommandListener::NetworkCommand::runCommand(SocketClient* client, int argc, 
         if (int ret = gCtls->netCtrl.destroyNetwork(netId)) {
             return operationError(client, "destroyNetwork() failed", ret);
         }
-        gCtls->resolverCtrl.clearDnsServers(netId);
+        // TODO: add clearing DNS back after NDC migrating to binder ver.
         return success(client);
     }
 
