@@ -34,16 +34,23 @@ aidl_interface {
         "binder/android/net/UidRangeParcel.aidl",
     ],
     api_dir: "binder/api",
-    // NDK doesn't support array now.
     backend: {
         cpp: {
             gen_log: true,
         },
-        ndk: {
-            enabled: false,
-        },
     },
-    versions: ["1"],
+    versions: [
+        "1",
+        "2",
+    ],
+}
+
+aidl_interface {
+    name: "oemnetd_aidl_interface",
+    local_include_dir: "binder",
+    srcs: [
+        "binder/com/android/internal/net/IOemNetd.aidl",
+    ],
 }
 
 // Modules common to both netd and netd_unit_test
@@ -134,6 +141,7 @@ cc_binary {
         "libutils",
         "netd_aidl_interface-cpp",
         "netd_event_listener_interface-cpp",
+        "oemnetd_aidl_interface-cpp",
     ],
     static_libs: [
         "libnetd_server",
@@ -142,7 +150,6 @@ cc_binary {
         "libnetd_resolv_headers",
     ],
     srcs: [
-        "CommandListener.cpp",
         "DummyNetwork.cpp",
         "EventReporter.cpp",
         "FwmarkServer.cpp",
@@ -154,6 +161,7 @@ cc_binary {
         "NetlinkHandler.cpp",
         "Network.cpp",
         "NetworkController.cpp",
+        "OemNetdListener.cpp",
         "PhysicalNetwork.cpp",
         "PppController.cpp",
         "Process.cpp",
@@ -167,8 +175,28 @@ cc_binary {
 cc_binary {
     name: "ndc",
     defaults: ["netd_defaults"],
-    shared_libs: ["libcutils"],
-    srcs: ["ndc.cpp"],
+    include_dirs: [
+        "system/netd/include",
+    ],
+    header_libs: [
+        "libnetd_client_headers",
+    ],
+    shared_libs: [
+        "libbase",
+        "libnetdutils",
+        "libnetutils",
+        "libcutils",
+        "liblog",
+        "libutils",
+        "libbinder",
+        "dnsresolver_aidl_interface-cpp",
+        "netd_aidl_interface-cpp",
+    ],
+    srcs: [
+        "ndc.cpp",
+        "UidRanges.cpp",
+        "NdcDispatcher.cpp",
+    ],
 }
 
 cc_test {
