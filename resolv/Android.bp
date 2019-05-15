@@ -8,12 +8,18 @@ aidl_interface {
     local_include_dir: "binder",
     srcs: [
         "binder/android/net/IDnsResolver.aidl",
+        "binder/android/net/ResolverParamsParcel.aidl",
     ],
     imports: [
         "netd_event_listener_interface",
     ],
-    api_dir: "binder/api",
     // Enable gen_log after it is supported in NDK backend. b/126501406
+    api_dir: "binder/api",
+    versions: [
+        "1",
+        "2",
+    ],
+
 }
 
 cc_test_library {
@@ -135,7 +141,7 @@ cc_test {
     compile_multilib: "both",
     sanitize: {
         address: true,
-        recover: [ "all" ],
+        recover: ["all"],
     },
 }
 
