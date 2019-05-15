@@ -42,6 +42,7 @@
 #include "NetdConstants.h"  // SHA256_SIZE
 #include "NetdNativeService.h"
 #include "NetdPermissions.h"
+#include "OemNetdListener.h"
 #include "Permission.h"
 #include "Process.h"
 #include "RouteController.h"
@@ -807,6 +808,11 @@ binder::Status NetdNativeService::wakeupDelInterface(const std::string& ifName,
     return asBinderStatus(gCtls->wakeupCtrl.delInterface(ifName, prefix, mark, mask));
 }
 
+binder::Status NetdNativeService::trafficSwapActiveStatsMap() {
+    ENFORCE_NETWORK_STACK_PERMISSIONS();
+    return asBinderStatus(gCtls->trafficCtrl.swapActiveStatsMap());
+}
+
 binder::Status NetdNativeService::idletimerAddInterface(const std::string& ifName, int32_t timeout,
                                                         const std::string& classLabel) {
     NETD_LOCKING_RPC(gCtls->idletimerCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
@@ -1197,6 +1203,21 @@ binder::Status NetdNativeService::firewallEnableChildChain(int32_t childChain, b
     return statusFromErrcode(res);
 }
 
+binder::Status NetdNativeService::firewallAddUidInterfaceRules(const std::string& ifName,
+                                                               const std::vector<int32_t>& uids) {
+    ENFORCE_NETWORK_STACK_PERMISSIONS();
+
+    return asBinderStatus(gCtls->trafficCtrl.addUidInterfaceRules(
+            RouteController::getIfIndex(ifName.c_str()), uids));
+}
+
+binder::Status NetdNativeService::firewallRemoveUidInterfaceRules(
+        const std::vector<int32_t>& uids) {
+    ENFORCE_NETWORK_STACK_PERMISSIONS();
+
+    return asBinderStatus(gCtls->trafficCtrl.removeUidInterfaceRules(uids));
+}
+
 binder::Status NetdNativeService::tetherAddForward(const std::string& intIface,
                                                    const std::string& extIface) {
     NETD_LOCKING_RPC(gCtls->tetherCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
@@ -1231,6 +1252,13 @@ binder::Status NetdNativeService::registerUnsolicitedEventListener(
         const android::sp<android::net::INetdUnsolicitedEventListener>& listener) {
     ENFORCE_NETWORK_STACK_PERMISSIONS();
     gCtls->eventReporter.registerUnsolEventListener(listener);
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::getOemNetd(android::sp<android::IBinder>* listener) {
+    ENFORCE_NETWORK_STACK_PERMISSIONS();
+    *listener = com::android::internal::net::OemNetdListener::getListener();
+
     return binder::Status::ok();
 }
 
