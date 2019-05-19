@@ -38,11 +38,6 @@
 #include "bpf/BpfUtils.h"
 #include "netdbpf/BpfNetworkStats.h"
 
-using ::testing::_;
-using ::testing::ByMove;
-using ::testing::Invoke;
-using ::testing::Return;
-using ::testing::StrictMock;
 using ::testing::Test;
 
 namespace android {
@@ -83,6 +78,7 @@ class BpfNetworkStatsHelperTest : public testing::Test {
 
     void SetUp() {
         SKIP_IF_BPF_NOT_SUPPORTED;
+        ASSERT_EQ(0, setrlimitForTest());
 
         mFakeCookieTagMap = BpfMap<uint64_t, UidTag>(createMap(
             BPF_MAP_TYPE_HASH, sizeof(uint64_t), sizeof(struct UidTag), TEST_MAP_SIZE, 0));
@@ -199,6 +195,20 @@ TEST_F(BpfNetworkStatsHelperTest, TestBpfIterateMap) {
     EXPECT_TRUE(isOk(mFakeCookieTagMap.iterate(iterateWithoutDeletion)));
     EXPECT_EQ(5, totalCount);
     EXPECT_EQ(1 + 2 + 3 + 4 + 5, totalSum);
+}
+
+TEST_F(BpfNetworkStatsHelperTest, TestUidStatsNoTraffic) {
+    SKIP_IF_BPF_NOT_SUPPORTED;
+
+    StatsValue value1 = {
+            .rxBytes = 0,
+            .rxPackets = 0,
+            .txBytes = 0,
+            .txPackets = 0,
+    };
+    Stats result1 = {};
+    ASSERT_EQ(0, bpfGetUidStatsInternal(TEST_UID1, &result1, mFakeAppUidStatsMap));
+    expectStatsEqual(value1, result1);
 }
 
 TEST_F(BpfNetworkStatsHelperTest, TestGetUidStatsTotal) {

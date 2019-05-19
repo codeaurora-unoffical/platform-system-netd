@@ -41,9 +41,13 @@ namespace net {
 // functions of class ResolverTest and class DnsResponderClient.
 class TestBase : public ::testing::Test {
   protected:
-    void TearDown() {
+    void SetUp() override {
+        // Create cache for test
+        resolv_create_cache_for_net(TEST_NETID);
+    }
+    void TearDown() override {
+        // Delete cache for test
         resolv_delete_cache_for_net(TEST_NETID);
-        resolv_set_nameservers_for_net(TEST_NETID, nullptr, 0, "", nullptr);
     }
 
     static std::string ToString(const hostent* he) {
@@ -84,7 +88,8 @@ class TestBase : public ::testing::Test {
             .success_threshold = 25,
             .min_samples = 8,
             .max_samples = 8,
-            .base_timeout_msec = 100,
+            .base_timeout_msec = 1000,
+            .retry_count = 2,
     };
     const android_net_context mNetcontext = {
             .app_netid = TEST_NETID,

@@ -35,8 +35,8 @@
 #include <android-base/properties.h>
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
+#include <netdutils/Stopwatch.h>
 
-#include "CommandListener.h"
 #include "Controllers.h"
 #include "FwmarkServer.h"
 #include "MDnsSdListener.h"
@@ -46,28 +46,54 @@
 #include "NetdNativeService.h"
 #include "NetlinkManager.h"
 #include "Process.h"
-#include "Stopwatch.h"
 
+#include "netd_resolv/resolv.h"
 #include "netd_resolv/resolv_stub.h"
 
 using android::IPCThreadState;
 using android::status_t;
-using android::net::CommandListener;
+using android::String16;
 using android::net::FwmarkServer;
+using android::net::gCtls;
+using android::net::gLog;
 using android::net::makeNFLogListener;
 using android::net::NetdHwService;
 using android::net::NetdNativeService;
 using android::net::NetlinkManager;
 using android::net::NFLogListener;
+using android::netdutils::Stopwatch;
 
 const char* const PID_FILE_PATH = "/data/misc/net/netd_pid";
 constexpr const char DNSPROXYLISTENER_SOCKET_NAME[] = "dnsproxyd";
 
 std::mutex android::net::gBigNetdLock;
 
+namespace {
+
+void getNetworkContextCallback(uint32_t netId, uint32_t uid, android_net_context* netcontext) {
+    gCtls->netCtrl.getNetworkContext(netId, uid, netcontext);
+}
+
+bool checkCallingPermissionCallback(const char* permission) {
+    return checkCallingPermission(String16(permission));
+}
+
+void logCallback(const char* msg) {
+    gLog.info(std::string(msg));
+}
+
+bool initDnsResolver() {
+    ResolverNetdCallbacks callbacks = {
+            .get_network_context = &getNetworkContextCallback,
+            .log = &logCallback,
+            .check_calling_permission = &checkCallingPermissionCallback,
+    };
+    return RESOLV_STUB.resolv_init(callbacks);
+}
+
+}  // namespace
+
 int main() {
-    using android::net::gCtls;
-    using android::net::gLog;
     Stopwatch s;
     gLog.info("netd 1.0 starting");
 
@@ -77,10 +103,8 @@ int main() {
     // Before we do anything that could fork, mark CLOEXEC the UNIX sockets that we get from init.
     // FrameworkListener does this on initialization as well, but we only initialize these
     // components after having initialized other subsystems that can fork.
-    for (const auto& sock : { CommandListener::SOCKET_NAME,
-                              DNSPROXYLISTENER_SOCKET_NAME,
-                              FwmarkServer::SOCKET_NAME,
-                              MDnsSdListener::SOCKET_NAME }) {
+    for (const auto& sock :
+         {DNSPROXYLISTENER_SOCKET_NAME, FwmarkServer::SOCKET_NAME, MDnsSdListener::SOCKET_NAME}) {
         setCloseOnExec(sock);
     }
 
@@ -101,9 +125,6 @@ int main() {
 
     gCtls = new android::net::Controllers();
     gCtls->init();
-
-    CommandListener cl;
-    nm->setBroadcaster((SocketListener *) &cl);
 
     if (nm->start()) {
         ALOGE("Unable to start NetlinkManager (%s)", strerror(errno));
@@ -130,7 +151,8 @@ int main() {
     // TODO: Check if we could remove it since resolver cache no loger
     // checks this environment variable after aosp/838050.
     setenv("ANDROID_DNS_MODE", "local", 1);
-    if (!gCtls->resolverCtrl.initResolver()) {
+    // Note that only call initDnsResolver after gCtls initializing.
+    if (!initDnsResolver()) {
         ALOGE("Unable to init resolver");
         exit(1);
     }
@@ -154,16 +176,6 @@ int main() {
         exit(1);
     }
     gLog.info("Registering NetdNativeService: %.1fms", subTime.getTimeAndReset());
-
-    /*
-     * Now that we're up, we can respond to commands. Starting the listener also tells
-     * NetworkManagementService that we are up and that our binder interface is ready.
-     */
-    if (cl.startListener()) {
-        ALOGE("Unable to start CommandListener (%s)", strerror(errno));
-        exit(1);
-    }
-    gLog.info("Starting CommandListener: %.1fms", subTime.getTimeAndReset());
 
     android::net::process::ScopedPidFile pidFile(PID_FILE_PATH);
 

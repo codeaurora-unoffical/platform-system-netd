@@ -17,12 +17,14 @@
 #ifndef NETD_SERVER_NETWORK_CONTROLLER_H
 #define NETD_SERVER_NETWORK_CONTROLLER_H
 
-
 #include <android-base/thread_annotations.h>
 #include <android/multinetwork.h>
 
+
 #include "NetdConstants.h"
 #include "Permission.h"
+#include "android/net/INetd.h"
+#include "netdutils/DumpWriter.h"
 
 #include <sys/types.h>
 #include <list>
@@ -70,7 +72,6 @@ static inline net_handle_t netIdToNetHandle(unsigned fromNetId) {
     return (((net_handle_t)fromNetId << 32) | kHandleMagic);
 }
 
-class DumpWriter;
 class Network;
 class UidRanges;
 class VirtualNetwork;
@@ -83,10 +84,11 @@ class VirtualNetwork;
  */
 class NetworkController {
 public:
-    static const unsigned MIN_OEM_ID;
-    static const unsigned MAX_OEM_ID;
-    static const unsigned LOCAL_NET_ID;
-    static const unsigned DUMMY_NET_ID;
+    // NetIds 52..98 are reserved for future use.
+    static constexpr int MIN_OEM_ID = 1;
+    static constexpr int MAX_OEM_ID = 50;
+    static constexpr int LOCAL_NET_ID = INetd::LOCAL_NET_ID;
+    static constexpr int DUMMY_NET_ID = 51;
 
     NetworkController();
 
@@ -140,9 +142,9 @@ public:
     void allowProtect(const std::vector<uid_t>& uids);
     void denyProtect(const std::vector<uid_t>& uids);
 
-    void dump(DumpWriter& dw);
+    void dump(netdutils::DumpWriter& dw);
 
-private:
+  private:
     bool isValidNetworkLocked(unsigned netId) const;
     Network* getNetworkLocked(unsigned netId) const;
     uint32_t getNetworkForDnsLocked(unsigned* netId, uid_t uid) const;
