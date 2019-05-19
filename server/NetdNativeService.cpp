@@ -19,6 +19,7 @@
 #include <cinttypes>
 #include <numeric>
 #include <set>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -34,26 +35,29 @@
 #include <binder/IServiceManager.h>
 
 #include <json/value.h>
-#include <openssl/base64.h>
+#include <json/writer.h>
 
 #include "Controllers.h"
-#include "DumpWriter.h"
 #include "InterfaceController.h"
 #include "NetdConstants.h"  // SHA256_SIZE
 #include "NetdNativeService.h"
 #include "NetdPermissions.h"
+#include "OemNetdListener.h"
 #include "Permission.h"
 #include "Process.h"
 #include "RouteController.h"
 #include "SockDiag.h"
 #include "UidRanges.h"
 #include "android/net/BnNetd.h"
+#include "netdutils/DumpWriter.h"
 #include "netid_client.h"  // NETID_UNSET
 
 using android::base::StringPrintf;
 using android::base::WriteStringToFile;
 using android::net::TetherStatsParcel;
 using android::net::UidRangeParcel;
+using android::netdutils::DumpWriter;
+using android::netdutils::ScopedIndent;
 using android::os::ParcelFileDescriptor;
 
 namespace android {
@@ -144,6 +148,40 @@ bool contains(const Vector<String16>& words, const String16& word) {
     return false;
 }
 
+std::string exceptionToString(int32_t exception) {
+    std::string ret = "UnknownException";
+    switch (exception) {
+        case binder::Status::EX_SECURITY:
+            ret = "SecurityException";
+            break;
+        case binder::Status::EX_BAD_PARCELABLE:
+            ret = "BadParcelableException";
+            break;
+        case binder::Status::EX_ILLEGAL_ARGUMENT:
+            ret = "IllegalArgumentException";
+            break;
+        case binder::Status::EX_NETWORK_MAIN_THREAD:
+            ret = "NetworkMainThreadException";
+            break;
+        case binder::Status::EX_UNSUPPORTED_OPERATION:
+            ret = "UnsupportedOperationException";
+            break;
+        case binder::Status::EX_SERVICE_SPECIFIC:
+            ret = "ServiceSpecificException";
+            break;
+        case binder::Status::EX_PARCELABLE:
+            ret = "ParcelableException";
+            break;
+        case binder::Status::EX_HAS_REPLY_HEADER:
+            ret = "HasReplyHeaderException";
+            break;
+        case binder::Status::EX_TRANSACTION_FAILED:
+            ret = "TransactionFailedException";
+            break;
+    }
+    return ret;
+}
+
 }  // namespace
 
 status_t NetdNativeService::start() {
@@ -158,31 +196,49 @@ status_t NetdNativeService::start() {
 
     // register log callback to BnNetd::logFunc
     BnNetd::logFunc = [](const Json::Value& logTransaction) {
+        using namespace std::string_literals;
+
         bool hasReturnArgs;
         std::string output;
-        const Json::Value& inputArgs = logTransaction["input_args"];
         const Json::Value& returnArgs = logTransaction["_aidl_return"];
-        Json::Value::Members member = inputArgs.getMemberNames();
+        const Json::Value& inputArgsArray = logTransaction["input_args"];
+        const int exceptionCode = logTransaction["binder_status"]["exception_code"].asInt();
 
         hasReturnArgs = !returnArgs.empty();
-        output.append(logTransaction["method_name"].asString().c_str() + std::string("("));
+        output.append(logTransaction["method_name"].asString() + "("s);
 
         // input args
-        for (Json::Value::Members::iterator iter = member.begin(); iter != member.end(); ++iter) {
-            std::string value = inputArgs[(*iter).c_str()].asString();
-            if (value.empty()) value = std::string("null");
+        Json::FastWriter fastWriter;
+        fastWriter.omitEndingLineFeed();
+        for (Json::Value::ArrayIndex i = 0; i < inputArgsArray.size(); ++i) {
+            std::string value = fastWriter.write(inputArgsArray[i]["value"]);
             output.append(value);
-            if (iter != member.end() - 1) {
-                output.append(", ");
+            if (i != inputArgsArray.size() - 1) {
+                output.append(", "s);
             }
         }
-        output.append(std::string(")"));
+        output.append(")"s);
+        if (hasReturnArgs || exceptionCode != binder::Status::EX_NONE) output.append(" -> "s);
+        // return status
+        if (!binder::Status::fromExceptionCode(exceptionCode).isOk()) {
+            // an exception occurred
+            if (exceptionCode == binder::Status::EX_SERVICE_SPECIFIC) {
+                output.append(StringPrintf(
+                        "%s(%d, \"%s\")", exceptionToString(exceptionCode).c_str(),
+                        logTransaction["binder_status"]["service_specific_error_code"].asInt(),
+                        logTransaction["binder_status"]["exception_message"].asString().c_str()));
+            } else {
+                output.append(StringPrintf(
+                        "%s(%d, \"%s\")", exceptionToString(exceptionCode).c_str(), exceptionCode,
+                        logTransaction["binder_status"]["exception_message"].asString().c_str()));
+            }
+        }
         // return args
         if (hasReturnArgs) {
-            output.append(StringPrintf(" -> (%s)", returnArgs.asString().c_str()));
+            output.append(StringPrintf("{%s}", fastWriter.write(returnArgs).c_str()));
         }
         // duration time
-        output.append(StringPrintf(" <%sms>", logTransaction["duration_ms"].asString().c_str()));
+        output.append(StringPrintf(" <%.2fms>", logTransaction["duration_ms"].asFloat()));
         gLog.info("%s", output.c_str());
     };
 
@@ -225,6 +281,9 @@ status_t NetdNativeService::dump(int fd, const Vector<String16> &args) {
     dw.blankline();
 
     gCtls->xfrmCtrl.dump(dw);
+    dw.blankline();
+
+    gCtls->clatdCtrl.dump(dw);
     dw.blankline();
 
     {
@@ -354,9 +413,7 @@ binder::Status NetdNativeService::networkCreateVpn(int32_t netId, bool secure) {
 
 binder::Status NetdNativeService::networkDestroy(int32_t netId) {
     ENFORCE_NETWORK_STACK_PERMISSIONS();
-    // Both of these functions manage their own locking internally.
-    // Clear DNS servers before deleting the cache to avoid the cache being created again.
-    gCtls->resolverCtrl.clearDnsServers(netId);
+    // NetworkController::destroyNetwork is thread-safe.
     const int ret = gCtls->netCtrl.destroyNetwork(netId);
     return statusFromErrcode(ret);
 }
@@ -425,86 +482,6 @@ binder::Status NetdNativeService::socketDestroy(const std::vector<UidRangeParcel
         return binder::Status::fromServiceSpecificError(-err,
                 String8::format("destroySockets: %s", strerror(-err)));
     }
-    return binder::Status::ok();
-}
-
-// Parse a base64 encoded string into a vector of bytes.
-// On failure, return an empty vector.
-static std::vector<uint8_t> parseBase64(const std::string& input) {
-    std::vector<uint8_t> decoded;
-    size_t out_len;
-    if (EVP_DecodedLength(&out_len, input.size()) != 1) {
-        return decoded;
-    }
-    // out_len is now an upper bound on the output length.
-    decoded.resize(out_len);
-    if (EVP_DecodeBase64(decoded.data(), &out_len, decoded.size(),
-            reinterpret_cast<const uint8_t*>(input.data()), input.size()) == 1) {
-        // Possibly shrink the vector if the actual output was smaller than the bound.
-        decoded.resize(out_len);
-    } else {
-        decoded.clear();
-    }
-    if (out_len != SHA256_SIZE) {
-        decoded.clear();
-    }
-    return decoded;
-}
-
-binder::Status NetdNativeService::setResolverConfiguration(int32_t netId,
-        const std::vector<std::string>& servers, const std::vector<std::string>& domains,
-        const std::vector<int32_t>& params, const std::string& tlsName,
-        const std::vector<std::string>& tlsServers,
-        const std::vector<std::string>& tlsFingerprints) {
-    // This function intentionally does not lock within Netd, as Bionic is thread-safe.
-    ENFORCE_INTERNAL_PERMISSIONS();
-
-    std::set<std::vector<uint8_t>> decoded_fingerprints;
-    for (const std::string& fingerprint : tlsFingerprints) {
-        std::vector<uint8_t> decoded = parseBase64(fingerprint);
-        if (decoded.empty()) {
-            return binder::Status::fromServiceSpecificError(EINVAL,
-                    String8::format("ResolverController error: bad fingerprint"));
-        }
-        decoded_fingerprints.emplace(decoded);
-    }
-
-    int err = gCtls->resolverCtrl.setResolverConfiguration(netId, servers, domains, params,
-            tlsName, tlsServers, decoded_fingerprints);
-    if (err != 0) {
-        return binder::Status::fromServiceSpecificError(-err,
-                String8::format("ResolverController error: %s", strerror(-err)));
-    }
-    return binder::Status::ok();
-}
-
-binder::Status NetdNativeService::getResolverInfo(
-        int32_t netId, std::vector<std::string>* servers, std::vector<std::string>* domains,
-        std::vector<std::string>* tlsServers, std::vector<int32_t>* params,
-        std::vector<int32_t>* stats, std::vector<int32_t>* wait_for_pending_req_timeout_count) {
-    // This function intentionally does not lock within Netd, as Bionic is thread-safe.
-    ENFORCE_NETWORK_STACK_PERMISSIONS();
-
-    int err = gCtls->resolverCtrl.getResolverInfo(netId, servers, domains, tlsServers, params,
-                                                  stats, wait_for_pending_req_timeout_count);
-    if (err != 0) {
-        return binder::Status::fromServiceSpecificError(-err,
-                String8::format("ResolverController error: %s", strerror(-err)));
-    }
-    return binder::Status::ok();
-}
-
-binder::Status NetdNativeService::resolverStartPrefix64Discovery(int32_t netId) {
-    // Locking happens in Dns64Configuration.
-    ENFORCE_NETWORK_STACK_PERMISSIONS();
-    gCtls->resolverCtrl.startPrefix64Discovery(netId);
-    return binder::Status::ok();
-}
-
-binder::Status NetdNativeService::resolverStopPrefix64Discovery(int32_t netId) {
-    // Locking happens in Dns64Configuration.
-    ENFORCE_NETWORK_STACK_PERMISSIONS();
-    gCtls->resolverCtrl.stopPrefix64Discovery(netId);
     return binder::Status::ok();
 }
 
@@ -831,6 +808,11 @@ binder::Status NetdNativeService::wakeupDelInterface(const std::string& ifName,
     return asBinderStatus(gCtls->wakeupCtrl.delInterface(ifName, prefix, mark, mask));
 }
 
+binder::Status NetdNativeService::trafficSwapActiveStatsMap() {
+    ENFORCE_NETWORK_STACK_PERMISSIONS();
+    return asBinderStatus(gCtls->trafficCtrl.swapActiveStatsMap());
+}
+
 binder::Status NetdNativeService::idletimerAddInterface(const std::string& ifName, int32_t timeout,
                                                         const std::string& classLabel) {
     NETD_LOCKING_RPC(gCtls->idletimerCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
@@ -884,7 +866,15 @@ binder::Status NetdNativeService::clatdStop(const std::string& ifName) {
 
 binder::Status NetdNativeService::ipfwdEnabled(bool* status) {
     NETD_LOCKING_RPC(gCtls->tetherCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
-    *status = (gCtls->tetherCtrl.forwardingRequestCount() > 0) ? true : false;
+    *status = (gCtls->tetherCtrl.getIpfwdRequesterList().size() > 0) ? true : false;
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::ipfwdGetRequesterList(std::vector<std::string>* requesterList) {
+    NETD_LOCKING_RPC(gCtls->tetherCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
+    for (const auto& requester : gCtls->tetherCtrl.getIpfwdRequesterList()) {
+        requesterList->push_back(requester);
+    }
     return binder::Status::ok();
 }
 
@@ -915,10 +905,6 @@ binder::Status NetdNativeService::ipfwdRemoveInterfaceForward(const std::string&
 }
 
 namespace {
-std::string addSquareBrackets(const std::string& s) {
-    return "[" + s + "]";
-}
-
 std::string addCurlyBrackets(const std::string& s) {
     return "{" + s + "}";
 }
@@ -927,18 +913,13 @@ std::string addCurlyBrackets(const std::string& s) {
 
 binder::Status NetdNativeService::interfaceGetList(std::vector<std::string>* interfaceListResult) {
     NETD_LOCKING_RPC(InterfaceController::mutex, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
-    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
-
     const auto& ifaceList = InterfaceController::getIfaceNames();
-    RETURN_BINDER_STATUS_IF_NOT_OK(entry, ifaceList);
 
     interfaceListResult->clear();
     interfaceListResult->reserve(ifaceList.value().size());
     interfaceListResult->insert(end(*interfaceListResult), begin(ifaceList.value()),
                                 end(ifaceList.value()));
 
-    gLog.log(entry.returns(addSquareBrackets(base::Join(*interfaceListResult, ", ")))
-                     .withAutomaticDuration());
     return binder::Status::ok();
 }
 
@@ -1183,9 +1164,7 @@ binder::Status NetdNativeService::networkCanProtect(int32_t uid, bool* ret) {
 binder::Status NetdNativeService::trafficSetNetPermForUids(int32_t permission,
                                                            const std::vector<int32_t>& uids) {
     ENFORCE_NETWORK_STACK_PERMISSIONS();
-    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__).arg(permission).arg(uids);
     gCtls->trafficCtrl.setPermissionForUids(permission, intsToUids(uids));
-    gLog.log(entry.withAutomaticDuration());
     return binder::Status::ok();
 }
 
@@ -1224,6 +1203,21 @@ binder::Status NetdNativeService::firewallEnableChildChain(int32_t childChain, b
     return statusFromErrcode(res);
 }
 
+binder::Status NetdNativeService::firewallAddUidInterfaceRules(const std::string& ifName,
+                                                               const std::vector<int32_t>& uids) {
+    ENFORCE_NETWORK_STACK_PERMISSIONS();
+
+    return asBinderStatus(gCtls->trafficCtrl.addUidInterfaceRules(
+            RouteController::getIfIndex(ifName.c_str()), uids));
+}
+
+binder::Status NetdNativeService::firewallRemoveUidInterfaceRules(
+        const std::vector<int32_t>& uids) {
+    ENFORCE_NETWORK_STACK_PERMISSIONS();
+
+    return asBinderStatus(gCtls->trafficCtrl.removeUidInterfaceRules(uids));
+}
+
 binder::Status NetdNativeService::tetherAddForward(const std::string& intIface,
                                                    const std::string& extIface) {
     NETD_LOCKING_RPC(gCtls->tetherCtrl.lock, PERM_NETWORK_STACK, PERM_MAINLINE_NETWORK_STACK);
@@ -1254,24 +1248,17 @@ binder::Status NetdNativeService::setTcpRWmemorySize(const std::string& rmemValu
     return binder::Status::ok();
 }
 
-binder::Status NetdNativeService::getPrefix64(int netId, std::string* _aidl_return) {
-    ENFORCE_NETWORK_STACK_PERMISSIONS();
-    netdutils::IPPrefix prefix{};
-    int err = gCtls->resolverCtrl.getPrefix64(netId, &prefix);
-    if (err != 0) {
-        return binder::Status::fromServiceSpecificError(
-                -err, String8::format("ResolverController error: %s", strerror(-err)));
-    }
-    *_aidl_return = prefix.toString();
-    return binder::Status::ok();
-}
-
 binder::Status NetdNativeService::registerUnsolicitedEventListener(
         const android::sp<android::net::INetdUnsolicitedEventListener>& listener) {
     ENFORCE_NETWORK_STACK_PERMISSIONS();
-    auto entry = gLog.newEntry().prettyFunction(__PRETTY_FUNCTION__);
     gCtls->eventReporter.registerUnsolEventListener(listener);
-    gLog.log(entry.withAutomaticDuration());
+    return binder::Status::ok();
+}
+
+binder::Status NetdNativeService::getOemNetd(android::sp<android::IBinder>* listener) {
+    ENFORCE_NETWORK_STACK_PERMISSIONS();
+    *listener = com::android::internal::net::OemNetdListener::getListener();
+
     return binder::Status::ok();
 }
 

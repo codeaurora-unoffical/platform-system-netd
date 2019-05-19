@@ -45,6 +45,9 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
     binder::Status firewallSetUidRule(int32_t childChain, int32_t uid,
                                       int32_t firewallRule) override;
     binder::Status firewallEnableChildChain(int32_t childChain, bool enable) override;
+    binder::Status firewallAddUidInterfaceRules(const std::string& ifName,
+                                                const std::vector<int32_t>& uids) override;
+    binder::Status firewallRemoveUidInterfaceRules(const std::vector<int32_t>& uids) override;
 
     // Bandwidth control commands.
     binder::Status bandwidthEnableDataSaver(bool enable, bool *ret) override;
@@ -102,20 +105,6 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
     // SOCK_DIAG commands.
     binder::Status socketDestroy(const std::vector<UidRangeParcel>& uids,
                                  const std::vector<int32_t>& skipUids) override;
-
-    // Resolver commands.
-    binder::Status setResolverConfiguration(int32_t netId, const std::vector<std::string>& servers,
-            const std::vector<std::string>& domains, const std::vector<int32_t>& params,
-            const std::string& tlsName,
-            const std::vector<std::string>& tlsServers,
-            const std::vector<std::string>& tlsFingerprints) override;
-    binder::Status getResolverInfo(
-            int32_t netId, std::vector<std::string>* servers, std::vector<std::string>* tlsServers,
-            std::vector<std::string>* domains, std::vector<int32_t>* params,
-            std::vector<int32_t>* stats,
-            std::vector<int32_t>* wait_for_pending_req_timeout_count) override;
-    binder::Status resolverStartPrefix64Discovery(int32_t netId);
-    binder::Status resolverStopPrefix64Discovery(int32_t netId);
 
     binder::Status setIPv6AddrGenMode(const std::string& ifName, int32_t mode) override;
 
@@ -207,6 +196,8 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
                                              int32_t direction, int32_t markValue, int32_t markMask,
                                              int32_t interfaceId);
 
+    binder::Status trafficSwapActiveStatsMap() override;
+
     binder::Status ipSecAddTunnelInterface(const std::string& deviceName,
                                            const std::string& localAddress,
                                            const std::string& remoteAddress, int32_t iKey,
@@ -235,6 +226,7 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
 
     // Ipfw-related commands
     binder::Status ipfwdEnabled(bool* status) override;
+    binder::Status ipfwdGetRequesterList(std::vector<std::string>* requesterList) override;
     binder::Status ipfwdEnableForwarding(const std::string& requester) override;
     binder::Status ipfwdDisableForwarding(const std::string& requester) override;
     binder::Status ipfwdAddInterfaceForward(const std::string& fromIface,
@@ -251,11 +243,10 @@ class NetdNativeService : public BinderService<NetdNativeService>, public BnNetd
     binder::Status setTcpRWmemorySize(const std::string& rmemValues,
                                       const std::string& wmemValues) override;
 
-    // DNS64-related commands (internal use only)
-    binder::Status getPrefix64(int netId, std::string* _aidl_return);
-
     binder::Status registerUnsolicitedEventListener(
             const android::sp<android::net::INetdUnsolicitedEventListener>& listener) override;
+
+    binder::Status getOemNetd(android::sp<android::IBinder>* listener) override;
 
   private:
     std::vector<uid_t> intsToUids(const std::vector<int32_t>& intUids);

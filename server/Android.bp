@@ -3,7 +3,7 @@ aidl_interface {
     name: "netd_event_listener_interface",
     local_include_dir: "binder",
     srcs: [
-        "binder/android/net/metrics/INetdEventListener.aidl"
+        "binder/android/net/metrics/INetdEventListener.aidl",
     ],
     api_dir: "binder/api",
 }
@@ -34,32 +34,23 @@ aidl_interface {
         "binder/android/net/UidRangeParcel.aidl",
     ],
     api_dir: "binder/api",
-    // NDK doesn't support array now.
     backend: {
         cpp: {
             gen_log: true,
         },
-        ndk: {
-            enabled: false,
-        },
     },
+    versions: [
+        "1",
+        "2",
+    ],
 }
 
 aidl_interface {
-    name: "netd_aidl_parcelables",
+    name: "oemnetd_aidl_interface",
     local_include_dir: "binder",
     srcs: [
-        "binder/android/net/InterfaceConfigurationParcel.aidl",
-        "binder/android/net/TetherStatsParcel.aidl",
-        "binder/android/net/UidRangeParcel.aidl",
+        "binder/com/android/internal/net/IOemNetd.aidl",
     ],
-    api_dir: "binder/api",
-    // NDK doesn't support array now.
-    backend: {
-        ndk: {
-            enabled: false,
-        },
-    },
 }
 
 // Modules common to both netd and netd_unit_test
@@ -73,8 +64,8 @@ cc_library_static {
     srcs: [
         "BandwidthController.cpp",
         "ClatdController.cpp",
+        "ClatUtils.cpp",
         "Controllers.cpp",
-        "Dns64Configuration.cpp",
         "NetdConstants.cpp",
         "FirewallController.cpp",
         "IdletimerController.cpp",
@@ -131,7 +122,6 @@ cc_binary {
         "libbase",
         "libbinder",
         "libbpf_android",
-        "libcrypto",
         "libcutils",
         "libdl",
         "libhidlbase",
@@ -151,6 +141,7 @@ cc_binary {
         "libutils",
         "netd_aidl_interface-cpp",
         "netd_event_listener_interface-cpp",
+        "oemnetd_aidl_interface-cpp",
     ],
     static_libs: [
         "libnetd_server",
@@ -159,9 +150,7 @@ cc_binary {
         "libnetd_resolv_headers",
     ],
     srcs: [
-        "CommandListener.cpp",
         "DummyNetwork.cpp",
-        "DumpWriter.cpp",
         "EventReporter.cpp",
         "FwmarkServer.cpp",
         "LocalNetwork.cpp",
@@ -172,11 +161,11 @@ cc_binary {
         "NetlinkHandler.cpp",
         "Network.cpp",
         "NetworkController.cpp",
+        "OemNetdListener.cpp",
         "PhysicalNetwork.cpp",
         "PppController.cpp",
         "Process.cpp",
         "ResolvStub.cpp",
-        "ResolverController.cpp",
         "VirtualNetwork.cpp",
         "main.cpp",
         "oem_iptables_hook.cpp",
@@ -186,8 +175,28 @@ cc_binary {
 cc_binary {
     name: "ndc",
     defaults: ["netd_defaults"],
-    shared_libs: ["libcutils"],
-    srcs: ["ndc.cpp"],
+    include_dirs: [
+        "system/netd/include",
+    ],
+    header_libs: [
+        "libnetd_client_headers",
+    ],
+    shared_libs: [
+        "libbase",
+        "libnetdutils",
+        "libnetutils",
+        "libcutils",
+        "liblog",
+        "libutils",
+        "libbinder",
+        "dnsresolver_aidl_interface-cpp",
+        "netd_aidl_interface-cpp",
+    ],
+    srcs: [
+        "ndc.cpp",
+        "UidRanges.cpp",
+        "NdcDispatcher.cpp",
+    ],
 }
 
 cc_test {
@@ -203,6 +212,7 @@ cc_test {
     srcs: [
         "BandwidthControllerTest.cpp",
         "ClatdControllerTest.cpp",
+        "ClatUtilsTest.cpp",
         "ControllersTest.cpp",
         "FirewallControllerTest.cpp",
         "IdletimerControllerTest.cpp",
