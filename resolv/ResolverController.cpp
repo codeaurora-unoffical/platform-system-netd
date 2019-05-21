@@ -15,7 +15,6 @@
  */
 
 #define LOG_TAG "ResolverController"
-#define DBG 0
 
 #include "ResolverController.h"
 
@@ -26,8 +25,8 @@
 #include <netdb.h>
 
 #include <aidl/android/net/IDnsResolver.h>
+#include <android-base/logging.h>
 #include <android-base/strings.h>
-#include <log/log.h>
 
 #include "Dns64Configuration.h"
 #include "DnsResolver.h"
@@ -38,6 +37,7 @@
 #include "netd_resolv/stats.h"
 
 using namespace std::placeholders;
+using aidl::android::net::ResolverParamsParcel;
 
 namespace android {
 
@@ -85,7 +85,7 @@ constexpr const char* validationStatusToString(Validation value) {
 void sendNat64PrefixEvent(const Dns64Configuration::Nat64PrefixInfo& args) {
     const auto& listeners = ResolverEventReporter::getInstance().getListeners();
     if (listeners.size() == 0) {
-        ALOGE("No available listener. dropping NAT64 prefix event");
+        LOG(ERROR) << __func__ << ": No available listener. dropping NAT64 prefix event";
         return;
     }
     for (const auto& it : listeners) {
@@ -131,7 +131,7 @@ int getDnsInfo(unsigned netId, std::vector<std::string>* servers, std::vector<st
 
     // Verify that the returned data is sane.
     if (nscount < 0 || nscount > MAXNS || dcount < 0 || dcount > MAXDNSRCH) {
-        ALOGE("%s: nscount=%d, dcount=%d", __FUNCTION__, nscount, dcount);
+        LOG(ERROR) << __func__ << ": nscount = " << nscount << ", dcount = " << dcount;
         return -ENOTRECOVERABLE;
     }
 
@@ -151,7 +151,7 @@ int getDnsInfo(unsigned netId, std::vector<std::string>* servers, std::vector<st
         if (rv == 0) {
             server_str.assign(hbuf);
         } else {
-            ALOGE("getnameinfo() failed for server #%d: %s", i, gai_strerror(rv));
+            LOG(ERROR) << "getnameinfo() failed for server #" << i << ": " << gai_strerror(rv);
             server_str.assign("<invalid>");
         }
         servers->push_back(std::move(server_str));
@@ -180,14 +180,18 @@ ResolverController::ResolverController()
               },
               std::bind(sendNat64PrefixEvent, _1)) {}
 
-int ResolverController::clearDnsServers(unsigned netId) {
-    if (DBG) {
-        ALOGD("clearDnsServers netId = %u\n", netId);
-    }
+void ResolverController::destroyNetworkCache(unsigned netId) {
+    LOG(VERBOSE) << __func__ << ": netId = " << netId;
+
     resolv_delete_cache_for_net(netId);
     mDns64Configuration.stopPrefixDiscovery(netId);
     resolv_delete_private_dns_for_net(netId);
-    return 0;
+}
+
+int ResolverController::createNetworkCache(unsigned netId) {
+    LOG(VERBOSE) << __func__ << ": netId = " << netId;
+
+    return resolv_create_cache_for_net(netId);
 }
 
 // TODO: remove below functions and call into PrivateDnsConfiguration directly.
@@ -195,24 +199,15 @@ int ResolverController::clearDnsServers(unsigned netId) {
 //       resolv_delete_private_dns_for_net()
 //       resolv_get_private_dns_status_for_net()
 int ResolverController::setResolverConfiguration(
-        int32_t netId, const std::vector<std::string>& servers,
-        const std::vector<std::string>& domains, const std::vector<int32_t>& params,
-        const std::string& tlsName, const std::vector<std::string>& tlsServers,
+        const ResolverParamsParcel& resolverParams,
         const std::set<std::vector<uint8_t>>& tlsFingerprints) {
     using aidl::android::net::IDnsResolver;
-    // TODO: make RESOLVER_PARAMS_BASE_TIMEOUT_MSEC a mandatory parameter once all callers
-    //       have been updated to specify it.
-    if (params.size() < IDnsResolver::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC ||
-        params.size() > IDnsResolver::RESOLVER_PARAMS_COUNT) {
-        ALOGE("%s: params.size()=%zu", __FUNCTION__, params.size());
-        return -EINVAL;
-    }
 
     std::vector<const char*> server_ptrs;
-    size_t count = std::min<size_t>(MAXNS, tlsServers.size());
+    size_t count = std::min<size_t>(MAXNS, resolverParams.tlsServers.size());
     server_ptrs.reserve(count);
     for (size_t i = 0; i < count; i++) {
-        server_ptrs.push_back(tlsServers[i].data());
+        server_ptrs.push_back(resolverParams.tlsServers[i].data());
     }
 
     std::vector<const uint8_t*> fingerprint_ptrs;
@@ -225,53 +220,43 @@ int ResolverController::setResolverConfiguration(
     // At private DNS validation time, we only know the netId, so we have to guess/compute the
     // corresponding socket mark.
     Fwmark fwmark;
-    fwmark.netId = netId;
+    fwmark.netId = resolverParams.netId;
     fwmark.explicitlySelected = true;
     fwmark.protectedFromVpn = true;
     fwmark.permission = PERMISSION_SYSTEM;
 
+    // TODO: Change resolv_set_private_dns_for_net() to take a vector directly.
     const int err = resolv_set_private_dns_for_net(
-            netId, fwmark.intValue, server_ptrs.data(), server_ptrs.size(), tlsName.c_str(),
-            fingerprint_ptrs.data(), fingerprint_ptrs.size());
+            resolverParams.netId, fwmark.intValue, server_ptrs.data(), server_ptrs.size(),
+            resolverParams.tlsName.c_str(), fingerprint_ptrs.data(), fingerprint_ptrs.size());
     if (err != 0) {
         return err;
     }
 
     // Convert network-assigned server list to bionic's format.
     server_ptrs.clear();
-    count = std::min<size_t>(MAXNS, servers.size());
+    count = std::min<size_t>(MAXNS, resolverParams.servers.size());
     server_ptrs.reserve(count);
     for (size_t i = 0; i < count; ++i) {
-        server_ptrs.push_back(servers[i].c_str());
+        server_ptrs.push_back(resolverParams.servers[i].c_str());
     }
 
-    std::string domains_str;
-    if (!domains.empty()) {
-        domains_str = domains[0];
-        count = std::min<size_t>(MAXDNSRCH, domains.size());
-        for (size_t i = 1; i < count; ++i) {
-            domains_str += " " + domains[i];
-        }
-    }
+    std::string domains_str = android::base::Join(resolverParams.domains, " ");
 
+    // TODO: Change resolv_set_nameservers_for_net() to use ResolverParamsParcel directly.
     res_params res_params = {};
-    res_params.sample_validity = params[IDnsResolver::RESOLVER_PARAMS_SAMPLE_VALIDITY];
-    res_params.success_threshold = params[IDnsResolver::RESOLVER_PARAMS_SUCCESS_THRESHOLD];
-    res_params.min_samples = params[IDnsResolver::RESOLVER_PARAMS_MIN_SAMPLES];
-    res_params.max_samples = params[IDnsResolver::RESOLVER_PARAMS_MAX_SAMPLES];
-    if (params.size() > IDnsResolver::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC) {
-        res_params.base_timeout_msec = params[IDnsResolver::RESOLVER_PARAMS_BASE_TIMEOUT_MSEC];
-    }
-    if (params.size() > IDnsResolver::RESOLVER_PARAMS_RETRY_COUNT) {
-        res_params.retry_count = params[IDnsResolver::RESOLVER_PARAMS_RETRY_COUNT];
-    }
+    res_params.sample_validity = resolverParams.sampleValiditySeconds;
+    res_params.success_threshold = resolverParams.successThreshold;
+    res_params.min_samples = resolverParams.minSamples;
+    res_params.max_samples = resolverParams.maxSamples;
+    res_params.base_timeout_msec = resolverParams.baseTimeoutMsec;
+    res_params.retry_count = resolverParams.retryCount;
 
-    if (DBG) {
-        ALOGD("setDnsServers netId = %u, numservers = %d", netId,
-              static_cast<int>(domains_str.size()));
-    }
-    return -resolv_set_nameservers_for_net(netId, server_ptrs.data(), server_ptrs.size(),
-                                           domains_str.c_str(), &res_params);
+    LOG(VERBOSE) << "setDnsServers netId = " << resolverParams.netId
+                 << ", numservers = " << resolverParams.domains.size();
+
+    return -resolv_set_nameservers_for_net(resolverParams.netId, server_ptrs.data(),
+                                           server_ptrs.size(), domains_str.c_str(), &res_params);
 }
 
 int ResolverController::getResolverInfo(int32_t netId, std::vector<std::string>* servers,
@@ -321,7 +306,8 @@ void ResolverController::stopPrefix64Discovery(int32_t netId) {
 int ResolverController::getPrefix64(unsigned netId, netdutils::IPPrefix* prefix) {
     netdutils::IPPrefix p = mDns64Configuration.getPrefix64(netId);
     if (p.family() != AF_INET6 || p.length() == 0) {
-        ALOGE("No valid NAT64 prefix (%d,%s)\n", netId, p.toString().c_str());
+        LOG(ERROR) << "No valid NAT64 prefix (" << netId << ", " << p.toString().c_str() << ")";
+
         return -ENOENT;
     }
     *prefix = p;
