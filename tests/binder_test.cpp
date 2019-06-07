@@ -974,7 +974,7 @@ TEST_F(BinderTest, GetSetProcSysNet) {
 
     std::string value{};
     EXPECT_TRUE(mNetd->getProcSysNet(ipversion, category, tun, parameter, &value).isOk());
-    EXPECT_FALSE(value.empty());
+    ASSERT_FALSE(value.empty());
     const int ival = std::stoi(value);
     EXPECT_GT(ival, 0);
     // Try doubling the parameter value (always best!).
@@ -1335,7 +1335,7 @@ bool getIpfwdV4Enable() {
 }
 
 bool getIpfwdV6Enable() {
-    static const char ipv6IpfwdCmd[] = "cat proc/sys/net/ipv6/conf/all/forwarding";
+    static const char ipv6IpfwdCmd[] = "cat /proc/sys/net/ipv6/conf/all/forwarding";
     std::vector<std::string> result = runCommand(ipv6IpfwdCmd);
     EXPECT_TRUE(!result.empty());
     int v6Enable = std::stoi(result[0]);
@@ -2876,7 +2876,7 @@ void checkUidsInPermissionMap(std::vector<int32_t>& uids, bool exist) {
         android::netdutils::StatusOr<uint8_t> permission = uidPermissionMap.readValue(uid);
         if (exist) {
             EXPECT_TRUE(isOk(permission));
-            EXPECT_EQ(INetd::NO_PERMISSIONS, permission.value());
+            EXPECT_EQ(INetd::PERMISSION_NONE, permission.value());
         } else {
             EXPECT_FALSE(isOk(permission));
             EXPECT_EQ(ENOENT, permission.status().code());
@@ -2893,7 +2893,7 @@ TEST_F(BinderTest, TestInternetPermission) {
 
     mNetd->trafficSetNetPermForUids(INetd::PERMISSION_INTERNET, appUids);
     checkUidsInPermissionMap(appUids, false);
-    mNetd->trafficSetNetPermForUids(INetd::NO_PERMISSIONS, appUids);
+    mNetd->trafficSetNetPermForUids(INetd::PERMISSION_NONE, appUids);
     checkUidsInPermissionMap(appUids, true);
     mNetd->trafficSetNetPermForUids(INetd::PERMISSION_UNINSTALLED, appUids);
     checkUidsInPermissionMap(appUids, false);
