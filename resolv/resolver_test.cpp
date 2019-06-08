@@ -36,7 +36,9 @@
 #include <numeric>
 #include <thread>
 
+#include <android-base/parseint.h>
 #include <android-base/stringprintf.h>
+#include <android-base/unique_fd.h>
 #include <android/multinetwork.h>  // ResNsendFlags
 #include <cutils/sockets.h>
 #include <gmock/gmock-matchers.h>
@@ -58,6 +60,7 @@
 
 #include "android/net/IDnsResolver.h"
 #include "binder/IServiceManager.h"
+#include "netdutils/ResponseCode.h"
 #include "netdutils/SocketOption.h"
 
 // TODO: make this dynamic and stop depending on implementation details.
@@ -70,9 +73,12 @@ extern "C" int android_getaddrinfofornet(const char* hostname, const char* servn
                                          const addrinfo* hints, unsigned netid, unsigned mark,
                                          struct addrinfo** result);
 
+using android::base::ParseInt;
 using android::base::StringPrintf;
+using android::base::unique_fd;
 using android::net::ResolverStats;
 using android::netdutils::enableSockopt;
+using android::netdutils::ResponseCode;
 
 // TODO: move into libnetdutils?
 namespace {
@@ -2090,9 +2096,12 @@ TEST_F(ResolverTest, Async_MalformedQuery) {
 TEST_F(ResolverTest, Async_CacheFlags) {
     constexpr char listen_addr[] = "127.0.0.4";
     constexpr char host_name[] = "howdy.example.com.";
+    constexpr char another_host_name[] = "howdy.example2.com.";
     const std::vector<DnsRecord> records = {
             {host_name, ns_type::ns_t_a, "1.2.3.4"},
             {host_name, ns_type::ns_t_aaaa, "::1.2.3.4"},
+            {another_host_name, ns_type::ns_t_a, "1.2.3.5"},
+            {another_host_name, ns_type::ns_t_aaaa, "::1.2.3.5"},
     };
 
     test::DNSResponder dns(listen_addr);
@@ -2181,6 +2190,37 @@ TEST_F(ResolverTest, Async_CacheFlags) {
 
     // Cache hits, expect still 2 queries
     EXPECT_EQ(2U, GetNumQueries(dns, host_name));
+
+    // Test both ANDROID_RESOLV_NO_CACHE_STORE and ANDROID_RESOLV_NO_CACHE_LOOKUP are set
+    dns.clearQueries();
+
+    // Make sure that the cache of "howdy.example2.com" exists.
+    fd1 = resNetworkQuery(TEST_NETID, "howdy.example2.com", ns_c_in, ns_t_aaaa, 0);
+    EXPECT_TRUE(fd1 != -1);
+    expectAnswersValid(fd1, AF_INET6, "::1.2.3.5");
+    EXPECT_EQ(1U, GetNumQueries(dns, another_host_name));
+
+    // Re-query with testFlags
+    const int testFlag = ANDROID_RESOLV_NO_CACHE_STORE | ANDROID_RESOLV_NO_CACHE_LOOKUP;
+    fd1 = resNetworkQuery(TEST_NETID, "howdy.example2.com", ns_c_in, ns_t_aaaa, testFlag);
+    EXPECT_TRUE(fd1 != -1);
+    expectAnswersValid(fd1, AF_INET6, "::1.2.3.5");
+    // Expect cache lookup is skipped.
+    EXPECT_EQ(2U, GetNumQueries(dns, another_host_name));
+
+    // Do another query with testFlags
+    fd1 = resNetworkQuery(TEST_NETID, "howdy.example2.com", ns_c_in, ns_t_a, testFlag);
+    EXPECT_TRUE(fd1 != -1);
+    expectAnswersValid(fd1, AF_INET, "1.2.3.5");
+    // Expect cache lookup is skipped.
+    EXPECT_EQ(3U, GetNumQueries(dns, another_host_name));
+
+    // Re-query with no flags
+    fd1 = resNetworkQuery(TEST_NETID, "howdy.example2.com", ns_c_in, ns_t_a, 0);
+    EXPECT_TRUE(fd1 != -1);
+    expectAnswersValid(fd1, AF_INET, "1.2.3.5");
+    // Expect no cache hit because cache storing is also skipped in previous query.
+    EXPECT_EQ(4U, GetNumQueries(dns, another_host_name));
 }
 
 TEST_F(ResolverTest, Async_NoRetryFlag) {
@@ -3292,4 +3332,70 @@ TEST_F(ResolverTest, GetHostByName2_Dns64QuerySpecialUseIPv4Addresses) {
 
         dns.clearQueries();
     }
+}
+
+namespace {
+
+void sendCommand(int fd, const std::string& cmd) {
+    ssize_t rc = TEMP_FAILURE_RETRY(write(fd, cmd.c_str(), cmd.size() + 1));
+    EXPECT_EQ(rc, static_cast<ssize_t>(cmd.size() + 1));
+}
+
+int32_t readBE32(int fd) {
+    int32_t tmp;
+    int n = TEMP_FAILURE_RETRY(read(fd, &tmp, sizeof(tmp)));
+    EXPECT_TRUE(n > 0);
+    return ntohl(tmp);
+}
+
+int readResonseCode(int fd) {
+    char buf[4];
+    int n = TEMP_FAILURE_RETRY(read(fd, &buf, sizeof(buf)));
+    EXPECT_TRUE(n > 0);
+    // The format of response code is that 4 bytes for the code & null.
+    buf[3] = '\0';
+    int result;
+    EXPECT_TRUE(ParseInt(buf, &result));
+    return result;
+}
+
+}  // namespace
+
+TEST_F(ResolverTest, getDnsNetId) {
+    // We've called setNetworkForProcess in SetupOemNetwork, so reset to default first.
+    setNetworkForProcess(NETID_UNSET);
+    int currentNetid;
+    EXPECT_TRUE(mDnsClient.netdService()->networkGetDefault(&currentNetid).isOk());
+    int dnsNetId = getNetworkForDns();
+    // Assume no vpn.
+    EXPECT_EQ(currentNetid, dnsNetId);
+
+    // Test with setNetworkForProcess
+    setNetworkForProcess(TEST_NETID);
+    dnsNetId = getNetworkForDns();
+    EXPECT_EQ(TEST_NETID, dnsNetId);
+    // Set back
+    setNetworkForProcess(NETID_UNSET);
+
+    // Test with setNetworkForResolv
+    setNetworkForResolv(TEST_NETID);
+    dnsNetId = getNetworkForDns();
+    EXPECT_EQ(TEST_NETID, dnsNetId);
+    // Set back
+    setNetworkForResolv(NETID_UNSET);
+
+    // Create socket connected to DnsProxyListener
+    int fd = dns_open_proxy();
+    EXPECT_TRUE(fd > 0);
+    unique_fd ufd(fd);
+
+    // Test command with wrong netId
+    sendCommand(fd, "getdnsnetid abc");
+    EXPECT_EQ(ResponseCode::DnsProxyQueryResult, readResonseCode(fd));
+    EXPECT_EQ(-EINVAL, readBE32(fd));
+
+    // Test unsupported command
+    sendCommand(fd, "getdnsnetidNotSupported");
+    // Keep in sync with FrameworkListener.cpp (500, "Command not recognized")
+    EXPECT_EQ(500, readResonseCode(fd));
 }
