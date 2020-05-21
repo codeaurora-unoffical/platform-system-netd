@@ -212,8 +212,8 @@ static const uint32_t uidBillingMask = Fwmark::getUidBillingMask();
  * See go/ipsec-data-accounting for more information.
  */
 
-const std::vector<std::string> getBasicAccountingCommands(const bool useBpf) {
-    const std::vector<std::string> ipt_basic_accounting_commands = {
+std::vector<std::string> getBasicAccountingCommands(const bool useBpf) {
+    std::vector<std::string> ipt_basic_accounting_commands = {
             "*filter",
 
             "-A bw_INPUT -j bw_global_alert",
@@ -227,7 +227,7 @@ const std::vector<std::string> getBasicAccountingCommands(const bool useBpf) {
             "-A bw_OUTPUT -j bw_global_alert",
             // Prevents IPSec double counting (Tunnel mode and Transport mode,
             // respectively)
-            "-A bw_OUTPUT -o " IPSEC_IFACE_PREFIX "+ -j RETURN",
+            ("-A bw_OUTPUT -o " IPSEC_IFACE_PREFIX "+ -j RETURN"),
             "-A bw_OUTPUT -m policy --pol ipsec --dir out -j RETURN",
             useBpf ? "" : "-A bw_OUTPUT -m owner --socket-exists",
 
@@ -241,7 +241,7 @@ const std::vector<std::string> getBasicAccountingCommands(const bool useBpf) {
             "*raw",
             // Prevents IPSec double counting (Tunnel mode and Transport mode,
             // respectively)
-            "-A bw_raw_PREROUTING -i " IPSEC_IFACE_PREFIX "+ -j RETURN",
+            ("-A bw_raw_PREROUTING -i " IPSEC_IFACE_PREFIX "+ -j RETURN"),
             "-A bw_raw_PREROUTING -m policy --pol ipsec --dir in -j RETURN",
             useBpf ? StringPrintf("-A bw_raw_PREROUTING -m bpf --object-pinned %s",
                                   XT_BPF_INGRESS_PROG_PATH)
@@ -251,7 +251,7 @@ const std::vector<std::string> getBasicAccountingCommands(const bool useBpf) {
             "*mangle",
             // Prevents IPSec double counting (Tunnel mode and Transport mode,
             // respectively)
-            "-A bw_mangle_POSTROUTING -o " IPSEC_IFACE_PREFIX "+ -j RETURN",
+            ("-A bw_mangle_POSTROUTING -o " IPSEC_IFACE_PREFIX "+ -j RETURN"),
             "-A bw_mangle_POSTROUTING -m policy --pol ipsec --dir out -j RETURN",
             useBpf ? "" : "-A bw_mangle_POSTROUTING -m owner --socket-exists",
             StringPrintf("-A bw_mangle_POSTROUTING -j MARK --set-mark 0x0/0x%x",
@@ -262,7 +262,6 @@ const std::vector<std::string> getBasicAccountingCommands(const bool useBpf) {
             COMMIT_AND_CLOSE};
     return ipt_basic_accounting_commands;
 }
-
 
 std::vector<std::string> toStrVec(int num, const char* const strs[]) {
     return std::vector<std::string>(strs, strs + num);

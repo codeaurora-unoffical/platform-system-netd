@@ -607,7 +607,8 @@ int TetherController::enableNat(const char* intIface, const char* extIface) {
     }
 
     // add this if we are the first enabled nat for this upstream
-    if (!isAnyForwardingEnabledOnUpstream(extIface)) {
+    bool firstDownstreamForThisUpstream = !isAnyForwardingEnabledOnUpstream(extIface);
+    if (firstDownstreamForThisUpstream) {
         std::vector<std::string> v4Cmds = {
             "*nat",
             StringPrintf("-A %s -o %s -j MASQUERADE", LOCAL_NAT_POSTROUTING, extIface),
@@ -633,7 +634,7 @@ int TetherController::enableNat(const char* intIface, const char* extIface) {
         return -ENODEV;
     }
 
-    maybeStartBpf(extIface);
+    if (firstDownstreamForThisUpstream) maybeStartBpf(extIface);
     return 0;
 }
 
@@ -817,11 +818,8 @@ int TetherController::disableNat(const char* intIface, const char* extIface) {
     }
 
     setForwardRules(false, intIface, extIface);
-    if (!isAnyForwardingPairEnabled()) {
-        setDefaults();
-    }
-
-    maybeStopBpf(extIface);
+    if (!isAnyForwardingEnabledOnUpstream(extIface)) maybeStopBpf(extIface);
+    if (!isAnyForwardingPairEnabled()) setDefaults();
     return 0;
 }
 
