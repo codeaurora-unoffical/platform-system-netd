@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include <DnsProxydProtocol.h>  // NETID_USE_LOCAL_NAMESERVERS
 #include <android-base/parseint.h>
 #include <android-base/unique_fd.h>
 
@@ -89,7 +90,7 @@ static bool propertyValueIsTrue(const char* prop_name) {
 }
 
 static bool redirectSocketCallsIsTrue() {
-    static bool cached_result = propertyValueIsTrue("ro.vendor.redirect_socket_calls");
+    static bool cached_result = propertyValueIsTrue(PROPERTY_REDIRECT_SOCKET_CALLS);
     return cached_result;
 }
 

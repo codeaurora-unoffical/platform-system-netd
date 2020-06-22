@@ -138,7 +138,7 @@ static inline bool skip_owner_match(struct __sk_buff* skb) {
     if (skb->protocol == htons(ETH_P_IP)) {
         offset = IP_PROTO_OFF;
         uint8_t proto, ihl;
-        uint16_t flag;
+        uint8_t flag;
         ret = bpf_skb_load_bytes(skb, offset, &proto, 1);
         if (!ret) {
             if (proto == IPPROTO_ESP) {
@@ -160,7 +160,7 @@ static inline bool skip_owner_match(struct __sk_buff* skb) {
             if (proto == IPPROTO_ESP) {
                 return true;
             } else if (proto == IPPROTO_TCP) {
-                uint16_t flag;
+                uint8_t flag;
                 ret = bpf_skb_load_bytes(skb, sizeof(struct ipv6hdr) + TCP_FLAG_OFF, &flag, 1);
                 if (ret == 0 && (flag >> RST_OFFSET & 1)) {
                     return true;
@@ -184,7 +184,7 @@ static __always_inline BpfConfig getConfig(uint32_t configKey) {
 static inline int bpf_owner_match(struct __sk_buff* skb, uint32_t uid, int direction) {
     if (skip_owner_match(skb)) return BPF_PASS;
 
-    if ((uid <= MAX_SYSTEM_UID) && (uid >= MIN_SYSTEM_UID)) return BPF_PASS;
+    if (is_system_uid(uid)) return BPF_PASS;
 
     BpfConfig enabledRules = getConfig(UID_RULES_CONFIGURATION_KEY);
 
@@ -223,6 +223,12 @@ static __always_inline inline void update_stats_with_config(struct __sk_buff* sk
 
 static __always_inline inline int bpf_traffic_account(struct __sk_buff* skb, int direction) {
     uint32_t sock_uid = bpf_get_socket_uid(skb);
+    // Always allow and never count clat traffic. Only the IPv4 traffic on the stacked
+    // interface is accounted for and subject to usage restrictions.
+    if (sock_uid == AID_CLAT) {
+        return BPF_PASS;
+    }
+
     int match = bpf_owner_match(skb, sock_uid, direction);
     if ((direction == BPF_EGRESS) && (match == BPF_DROP)) {
         // If an outbound packet is going to be dropped, we do not count that
@@ -274,6 +280,12 @@ int bpf_cgroup_egress(struct __sk_buff* skb) {
 
 DEFINE_BPF_PROG("skfilter/egress/xtbpf", AID_ROOT, AID_NET_ADMIN, xt_bpf_egress_prog)
 (struct __sk_buff* skb) {
+    // Clat daemon does not generate new traffic, all its traffic is accounted for already
+    // on the v4-* interfaces (except for the 20 (or 28) extra bytes of IPv6 vs IPv4 overhead,
+    // but that can be corrected for later when merging v4-foo stats into interface foo's).
+    uint32_t sock_uid = bpf_get_socket_uid(skb);
+    if (sock_uid == AID_CLAT) return BPF_NOMATCH;
+
     uint32_t key = skb->ifindex;
     update_iface_stats_map(skb, BPF_EGRESS, &key);
     return BPF_MATCH;
@@ -281,6 +293,11 @@ DEFINE_BPF_PROG("skfilter/egress/xtbpf", AID_ROOT, AID_NET_ADMIN, xt_bpf_egress_
 
 DEFINE_BPF_PROG("skfilter/ingress/xtbpf", AID_ROOT, AID_NET_ADMIN, xt_bpf_ingress_prog)
 (struct __sk_buff* skb) {
+    // Clat daemon traffic is not accounted by virtue of iptables raw prerouting drop rule
+    // (in clat_raw_PREROUTING chain), which triggers before this (in bw_raw_PREROUTING chain).
+    // It will be accounted for on the v4-* clat interface instead.
+    // Keep that in mind when moving this out of iptables xt_bpf and into tc ingress (or xdp).
+
     uint32_t key = skb->ifindex;
     update_iface_stats_map(skb, BPF_INGRESS, &key);
     return BPF_MATCH;
