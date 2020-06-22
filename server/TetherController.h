@@ -75,7 +75,7 @@ class TetherController {
     // BPF maps, initialized by maybeInitMaps.
     bpf::BpfMap<TetherIngressKey, TetherIngressValue> mBpfIngressMap;
     bpf::BpfMap<uint32_t, TetherStatsValue> mBpfStatsMap;
-    bpf::BpfMap<uint32_t, IfaceValue> mIfaceIndexNameMap;
+    bpf::BpfMap<uint32_t, uint64_t> mBpfLimitMap;
 
   public:
     TetherController();
@@ -108,6 +108,8 @@ class TetherController {
     base::Result<void> addOffloadRule(const TetherOffloadRuleParcel& rule);
     base::Result<void> removeOffloadRule(const TetherOffloadRuleParcel& rule);
 
+    int setTetherOffloadInterfaceQuota(int ifIndex, int64_t maxBytes);
+
     class TetherStats {
       public:
         TetherStats() = default;
@@ -136,9 +138,20 @@ class TetherController {
         }
     };
 
+    struct TetherOffloadStats {
+        int ifIndex;
+        int64_t rxBytes;
+        int64_t rxPackets;
+        int64_t txBytes;
+        int64_t txPackets;
+    };
+
     typedef std::vector<TetherStats> TetherStatsList;
+    typedef std::vector<TetherOffloadStats> TetherOffloadStatsList;
 
     netdutils::StatusOr<TetherStatsList> getTetherStats();
+    netdutils::StatusOr<TetherOffloadStatsList> getTetherOffloadStats();
+    base::Result<TetherOffloadStats> getAndClearTetherOffloadStats(int ifIndex);
 
     /*
      * extraProcessingInfo: contains raw parsed data, and error info.
@@ -182,6 +195,7 @@ class TetherController {
     int setForwardRules(bool set, const char *intIface, const char *extIface);
     int setTetherCountingRules(bool add, const char *intIface, const char *extIface);
 
+    base::Result<void> setBpfLimit(uint32_t ifIndex, uint64_t limit);
     void maybeInitMaps();
     void maybeStartBpf(const char* extIface);
     void maybeStopBpf(const char* extIface);

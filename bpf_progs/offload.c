@@ -28,8 +28,11 @@ DEFINE_BPF_MAP_GRW(tether_ingress_map, HASH, TetherIngressKey, TetherIngressValu
                    AID_NETWORK_STACK)
 
 // Tethering stats, indexed by upstream interface.
-DEFINE_BPF_MAP_GRW(tether_stats_map, HASH, uint32_t, TetherStatsValue, IFACE_STATS_MAP_SIZE,
-                   AID_NETWORK_STACK)
+DEFINE_BPF_MAP_GRW(tether_stats_map, HASH, uint32_t, TetherStatsValue, 16, AID_NETWORK_STACK)
+
+// Tethering data limit, indexed by upstream interface.
+// (tethering allowed when stats[iif].rxBytes + stats[iif].txBytes < limit[iif])
+DEFINE_BPF_MAP_GRW(tether_limit_map, HASH, uint32_t, uint64_t, 16, AID_NETWORK_STACK)
 
 static inline __always_inline int do_forward(struct __sk_buff* skb, bool is_ethernet) {
     int l2_header_size = is_ethernet ? sizeof(struct ethhdr) : 0;
@@ -54,6 +57,12 @@ static inline __always_inline int do_forward(struct __sk_buff* skb, bool is_ethe
     // Let the kernel's stack handle these cases and generate appropriate ICMP errors.
     if (ip6->hop_limit <= 1) return TC_ACT_OK;
 
+    // Protect against forwarding packets sourced from ::1 or fe80::/64 or other weirdness.
+    __be32 src32 = ip6->saddr.s6_addr32[0];
+    if (src32 != htonl(0x0064ff9b) &&                        // 64:ff9b:/32 incl. XLAT464 WKP
+        (src32 & htonl(0xe0000000)) != htonl(0x20000000))    // 2000::/3 Global Unicast
+        return TC_ACT_OK;
+
     TetherIngressKey k = {
             .iif = skb->ifindex,
             .neigh6 = ip6->daddr,
@@ -64,37 +73,46 @@ static inline __always_inline int do_forward(struct __sk_buff* skb, bool is_ethe
     // If we don't find any offload information then simply let the core stack handle it...
     if (!v) return TC_ACT_OK;
 
-    uint32_t stat_k = skb->ifindex;
+    uint32_t stat_and_limit_k = skb->ifindex;
 
-    TetherStatsValue* stat_v = bpf_tether_stats_map_lookup_elem(&stat_k);
+    TetherStatsValue* stat_v = bpf_tether_stats_map_lookup_elem(&stat_and_limit_k);
 
-    // If we don't have anywhere to put stats, create an empty entry.
-    if (!stat_v) {
-        TetherStatsValue emptyStats = {};
-        bpf_tether_stats_map_update_elem(&stat_k, &emptyStats, BPF_NOEXIST);
-        stat_v = bpf_tether_stats_map_lookup_elem(&stat_k);
-    }
-
-    // If we *still* don't have anywhere to put stats, then abort...
+    // If we don't have anywhere to put stats, then abort...
     if (!stat_v) return TC_ACT_OK;
 
-    // This is approximate handling of tcp/ip overhead for incoming LRO/GRO packets:
-    // mtu of 1500 is not necessarily correct, but worst case we simply undercount,
-    // which is still better then not accounting for this overhead at all.
-    // Note: this really shouldn't be device mtu at all, but rather should be derived
-    // from this particular connection's mss - which requires a much newer kernel.
-    const int mtu = 1500;
+    uint64_t* limit_v = bpf_tether_limit_map_lookup_elem(&stat_and_limit_k);
+
+    // If we don't have a limit, then abort...
+    if (!limit_v) return TC_ACT_OK;
+
+    // Required IPv6 minimum mtu is 1280, below that not clear what we should do, abort...
+    const int pmtu = v->pmtu;
+    if (pmtu < IPV6_MIN_MTU) return TC_ACT_OK;
+
+    // Approximate handling of TCP/IPv6 overhead for incoming LRO/GRO packets: default
+    // outbound path mtu of 1500 is not necessarily correct, but worst case we simply
+    // undercount, which is still better then not accounting for this overhead at all.
+    // Note: this really shouldn't be device/path mtu at all, but rather should be
+    // derived from this particular connection's mss (ie. from gro segment size).
+    // This would require a much newer kernel with newer ebpf accessors.
+    // (This is also blindly assuming 12 bytes of tcp timestamp option in tcp header)
     uint64_t packets = 1;
     uint64_t bytes = skb->len;
-    if (bytes > mtu) {
-        const bool is_ipv6 = (skb->protocol == htons(ETH_P_IPV6));
-        const int ip_overhead = (is_ipv6 ? sizeof(struct ipv6hdr) : sizeof(struct iphdr));
-        const int tcp_overhead = ip_overhead + sizeof(struct tcphdr) + 12;
-        const int mss = mtu - tcp_overhead;
+    if (bytes > pmtu) {
+        const int tcp_overhead = sizeof(struct ipv6hdr) + sizeof(struct tcphdr) + 12;
+        const int mss = pmtu - tcp_overhead;
         const uint64_t payload = bytes - tcp_overhead;
         packets = (payload + mss - 1) / mss;
         bytes = tcp_overhead * packets + payload;
     }
+
+    // Are we past the limit?  If so, then abort...
+    // Note: will not overflow since u64 is 936 years even at 5Gbps.
+    // Do not drop here.  Offload is just that, whenever we fail to handle
+    // a packet we let the core stack deal with things.
+    // (The core stack needs to handle limits correctly anyway,
+    // since we don't offload all traffic in both directions)
+    if (stat_v->rxBytes + stat_v->txBytes + bytes > *limit_v) return TC_ACT_OK;
 
     if (!is_ethernet) {
         is_ethernet = true;

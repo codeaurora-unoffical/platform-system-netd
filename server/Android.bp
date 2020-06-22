@@ -23,6 +23,7 @@ aidl_interface {
             apex_available: [
                 "//apex_available:platform", // used from services.net
                 "com.android.bluetooth.updatable",
+                "com.android.tethering",
                 "com.android.wifi",
             ],
         },
@@ -31,6 +32,7 @@ aidl_interface {
         "1",
         "2",
         "3",
+        "4",
     ],
 }
 
@@ -47,6 +49,7 @@ aidl_interface {
                 "//apex_available:platform",
                 "com.android.resolv",
             ],
+            min_sdk_version: "29",
         },
     },
 }
@@ -95,6 +98,7 @@ filegroup {
         "InterfaceController.cpp",
         "NetlinkCommands.cpp",
         "NetlinkListener.cpp",
+        "OffloadUtils.cpp",
         "SockDiag.cpp",
         "XfrmController.cpp",
         "TrafficController.cpp",

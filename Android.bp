@@ -1,10 +1,16 @@
 cc_library_headers {
     name: "libnetd_client_headers",
     export_include_dirs: ["include"],
+}
+
+cc_library_headers {
+    name: "libnetdbinder_utils_headers",
+    export_include_dirs: ["include/binder_utils"],
     apex_available: [
         "//apex_available:platform",
         "com.android.resolv",
     ],
+    min_sdk_version: "29",
 }
 
 cc_defaults {
